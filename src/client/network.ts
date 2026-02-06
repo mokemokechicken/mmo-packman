@@ -21,6 +21,7 @@ export class NetworkClient {
   private ws: WebSocket | null = null;
   private reconnectTimer: number | null = null;
   private reconnectEnabled = true;
+  private connectionSerial = 0;
   private readonly reconnectDelayMs: number;
   private readonly wsUrlFactory: () => string;
 
@@ -44,13 +45,21 @@ export class NetworkClient {
     }
 
     const url = this.wsUrlFactory();
+    const serial = this.connectionSerial + 1;
+    this.connectionSerial = serial;
     this.ws = new WebSocket(url);
 
     this.ws.addEventListener('open', () => {
+      if (serial !== this.connectionSerial) {
+        return;
+      }
       this.callbacks.onOpen();
     });
 
     this.ws.addEventListener('message', (event) => {
+      if (serial !== this.connectionSerial) {
+        return;
+      }
       const message = parseServerMessage(event.data.toString());
       if (!message) {
         this.callbacks.onInvalidMessage();
@@ -60,6 +69,9 @@ export class NetworkClient {
     });
 
     this.ws.addEventListener('close', (event) => {
+      if (serial !== this.connectionSerial) {
+        return;
+      }
       this.ws = null;
       this.callbacks.onConnectionClosed();
 
@@ -75,6 +87,10 @@ export class NetworkClient {
         window.clearTimeout(this.reconnectTimer);
       }
       this.reconnectTimer = window.setTimeout(() => {
+        if (serial !== this.connectionSerial) {
+          return;
+        }
+        this.reconnectTimer = null;
         this.connect();
       }, this.reconnectDelayMs);
     });
@@ -95,6 +111,7 @@ export class NetworkClient {
     }
 
     if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
+      this.connectionSerial += 1;
       this.ws.close(1000, 'client_disconnect');
     }
     this.ws = null;

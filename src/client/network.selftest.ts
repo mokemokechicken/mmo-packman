@@ -12,6 +12,7 @@ class MockWebSocket {
 
   public readonly OPEN = MockWebSocket.OPEN;
   public readyState = MockWebSocket.CONNECTING;
+  public emitCloseOnClose = true;
   public readonly sent: string[] = [];
   private readonly listeners: Record<string, Listener[]> = {
     open: [],
@@ -33,7 +34,9 @@ class MockWebSocket {
 
   public close(code = 1000, reason = ''): void {
     this.readyState = MockWebSocket.CLOSED;
-    this.emit('close', { code, reason });
+    if (this.emitCloseOnClose) {
+      this.emit('close', { code, reason });
+    }
   }
 
   public emitOpen(): void {
@@ -163,8 +166,75 @@ function testConnectIdempotencyAndReconnect(): void {
     assert.equal(timers.length, 1);
 
     const reconnectTask = timers[0] as TimerTask;
+    timers.splice(0, 1);
     reconnectTask.fn();
     assert.equal(MockWebSocket.instances.length, 2);
+  } finally {
+    restore();
+  }
+}
+
+function testConnectionReplacedDoesNotReconnect(): void {
+  const { timers, restore } = installMocks();
+  try {
+    let replacedCount = 0;
+    const client = new NetworkClient(
+      {
+        onOpen() {},
+        onMessage() {},
+        onInvalidMessage() {},
+        onConnectionReplaced() {
+          replacedCount += 1;
+        },
+        onConnectionClosed() {},
+      },
+      { wsUrlFactory: () => 'ws://test' },
+    );
+
+    client.connect();
+    const socket = MockWebSocket.instances[0] as MockWebSocket;
+    socket.emitOpen();
+    socket.emitClose(4001);
+
+    assert.equal(replacedCount, 1);
+    assert.equal(timers.length, 0);
+  } finally {
+    restore();
+  }
+}
+
+function testStaleCloseDoesNotBreakNewConnection(): void {
+  const { timers, restore } = installMocks();
+  try {
+    const client = new NetworkClient(
+      {
+        onOpen() {},
+        onMessage() {},
+        onInvalidMessage() {},
+        onConnectionReplaced() {},
+        onConnectionClosed() {},
+      },
+      { wsUrlFactory: () => 'ws://test' },
+    );
+
+    client.connect();
+    const socketA = MockWebSocket.instances[0] as MockWebSocket;
+    socketA.emitOpen();
+    socketA.emitCloseOnClose = false;
+
+    client.disconnect();
+    client.connect();
+    const socketB = MockWebSocket.instances[1] as MockWebSocket;
+    socketB.emitOpen();
+
+    client.send({ type: 'ping', t: 1 });
+    assert.equal(socketB.sent.length, 1);
+
+    socketA.emitClose(1000);
+    assert.equal(timers.length, 0);
+
+    client.send({ type: 'ping', t: 2 });
+    assert.equal(socketB.sent.length, 2);
   } finally {
     restore();
   }
@@ -173,6 +243,8 @@ function testConnectIdempotencyAndReconnect(): void {
 function run(): void {
   testDisconnectDisablesReconnect();
   testConnectIdempotencyAndReconnect();
+  testConnectionReplacedDoesNotReconnect();
+  testStaleCloseDoesNotBreakNewConnection();
   console.log('client network selftest: OK');
 }
 
