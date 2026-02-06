@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::constants::{
@@ -15,8 +15,7 @@ use crate::types::{
     TimelineEvent, Vec2,
 };
 use crate::world::{
-    build_gate_switch_cell_set, generate_world, is_gate_cell_or_switch, is_walkable, key_of,
-    to_world_init, GeneratedWorld,
+    generate_world, is_gate_cell_or_switch, is_walkable, key_of, to_world_init, GeneratedWorld,
 };
 
 const AUTO_RESPAWN_GRACE_MS: u64 = 2_000;
@@ -76,7 +75,6 @@ pub struct GameEngine {
     tick_counter: u64,
     max_capture_ratio: f32,
     milestone_emitted: HashSet<i32>,
-    gate_switch_cells: HashSet<(i32, i32)>,
     next_id_counter: u64,
 }
 
@@ -167,10 +165,8 @@ impl GameEngine {
             tick_counter: 0,
             max_capture_ratio: 0.0,
             milestone_emitted: HashSet::new(),
-            gate_switch_cells: HashSet::new(),
             next_id_counter: 1,
         };
-        engine.gate_switch_cells = build_gate_switch_cell_set(&engine.world.gates);
         engine.spawn_initial_ghosts();
         engine
     }
@@ -201,21 +197,35 @@ impl GameEngine {
 
         self.update_gates();
         self.update_power_pellets(now_ms);
+        let player_positions_before_move: BTreeMap<String, (i32, i32)> = self
+            .players
+            .iter()
+            .map(|player| (player.view.id.clone(), (player.view.x, player.view.y)))
+            .collect();
+        let ghost_positions_before_move: BTreeMap<String, (i32, i32)> = self
+            .ghosts
+            .iter()
+            .map(|ghost| (ghost.view.id.clone(), (ghost.view.x, ghost.view.y)))
+            .collect();
         self.update_players(dt_ms, now_ms);
         self.update_ghosts(dt_ms, now_ms);
-        self.resolve_ghost_collisions(now_ms);
+        self.resolve_ghost_collisions(
+            now_ms,
+            &player_positions_before_move,
+            &ghost_positions_before_move,
+        );
         self.update_sector_control(dt_ms, now_ms);
         self.adjust_ghost_population(now_ms);
         self.emit_progress_milestones();
         self.check_game_over(now_ms);
     }
 
-    pub fn build_snapshot(&self, include_events: bool) -> Snapshot {
+    pub fn build_snapshot(&mut self, include_events: bool) -> Snapshot {
         let time_left_ms = self
             .config
             .time_limit_ms
             .saturating_sub(self.elapsed_ms.min(self.config.time_limit_ms));
-        Snapshot {
+        let snapshot = Snapshot {
             tick: self.tick_counter,
             now_ms: self.started_at_ms + self.elapsed_ms,
             time_left_ms,
@@ -240,7 +250,11 @@ impl GameEngine {
                 .into_iter()
                 .rev()
                 .collect(),
+        };
+        if include_events {
+            self.events.clear();
         }
+        snapshot
     }
 
     pub fn build_summary(&self) -> GameSummary {
@@ -518,15 +532,36 @@ impl GameEngine {
         }
     }
 
-    fn resolve_ghost_collisions(&mut self, now_ms: u64) {
+    fn resolve_ghost_collisions(
+        &mut self,
+        now_ms: u64,
+        player_positions_before_move: &BTreeMap<String, (i32, i32)>,
+        ghost_positions_before_move: &BTreeMap<String, (i32, i32)>,
+    ) {
         for player_idx in 0..self.players.len() {
             if self.players[player_idx].view.state == PlayerState::Down {
                 continue;
             }
             for ghost_idx in 0..self.ghosts.len() {
-                if self.players[player_idx].view.x != self.ghosts[ghost_idx].view.x
-                    || self.players[player_idx].view.y != self.ghosts[ghost_idx].view.y
-                {
+                let overlap = self.players[player_idx].view.x == self.ghosts[ghost_idx].view.x
+                    && self.players[player_idx].view.y == self.ghosts[ghost_idx].view.y;
+                let swapped = match (
+                    player_positions_before_move.get(&self.players[player_idx].view.id),
+                    ghost_positions_before_move.get(&self.ghosts[ghost_idx].view.id),
+                ) {
+                    (
+                        Some((player_before_x, player_before_y)),
+                        Some((ghost_before_x, ghost_before_y)),
+                    ) => {
+                        *player_before_x == self.ghosts[ghost_idx].view.x
+                            && *player_before_y == self.ghosts[ghost_idx].view.y
+                            && *ghost_before_x == self.players[player_idx].view.x
+                            && *ghost_before_y == self.players[player_idx].view.y
+                    }
+                    _ => false,
+                };
+
+                if !overlap && !swapped {
                     continue;
                 }
 
@@ -1318,4 +1353,133 @@ fn pick_ghost_type(capture_ratio: f32, rng: &mut Rng) -> GhostType {
         return GhostType::Invader;
     }
     GhostType::Boss
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::constants::TICK_MS;
+    use crate::engine::{GameEngine, GameEngineOptions};
+    use crate::types::{Difficulty, Direction, PlayerState, RuntimeEvent, StartPlayer};
+
+    fn make_players(count: usize) -> Vec<StartPlayer> {
+        (0..count)
+            .map(|idx| StartPlayer {
+                id: format!("p{}", idx + 1),
+                name: format!("P{}", idx + 1),
+                reconnect_token: format!("token_{}", idx + 1),
+                connected: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn same_seed_produces_same_progression() {
+        let players = make_players(10);
+        let mut a = GameEngine::new(
+            players.clone(),
+            Difficulty::Normal,
+            424_242,
+            GameEngineOptions {
+                time_limit_ms_override: Some(120_000),
+            },
+        );
+        let mut b = GameEngine::new(
+            players,
+            Difficulty::Normal,
+            424_242,
+            GameEngineOptions {
+                time_limit_ms_override: Some(120_000),
+            },
+        );
+
+        for _ in 0..400 {
+            a.step(TICK_MS);
+            b.step(TICK_MS);
+            let sa = a.build_snapshot(false);
+            let sb = b.build_snapshot(false);
+
+            assert_eq!(sa.capture_ratio.to_bits(), sb.capture_ratio.to_bits());
+            assert_eq!(sa.players.len(), sb.players.len());
+            assert_eq!(sa.ghosts.len(), sb.ghosts.len());
+
+            for (pa, pb) in sa.players.iter().zip(sb.players.iter()) {
+                assert_eq!(pa.id, pb.id);
+                assert_eq!(pa.x, pb.x);
+                assert_eq!(pa.y, pb.y);
+                assert_eq!(pa.state as u8, pb.state as u8);
+                assert_eq!(pa.score, pb.score);
+            }
+            for (ga, gb) in sa.ghosts.iter().zip(sb.ghosts.iter()) {
+                assert_eq!(ga.id, gb.id);
+                assert_eq!(ga.x, gb.x);
+                assert_eq!(ga.y, gb.y);
+                assert_eq!(ga.ghost_type as u8, gb.ghost_type as u8);
+                assert_eq!(ga.hp, gb.hp);
+            }
+
+            if a.is_ended() || b.is_ended() {
+                assert_eq!(a.is_ended(), b.is_ended());
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn swap_collision_downs_player() {
+        let mut engine = GameEngine::new(
+            make_players(1),
+            Difficulty::Normal,
+            100,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        engine.ghosts.truncate(1);
+        assert_eq!(engine.ghosts.len(), 1);
+
+        let player_id = engine.players[0].view.id.clone();
+        let ghost_id = engine.ghosts[0].view.id.clone();
+        engine.players[0].view.state = PlayerState::Normal;
+        engine.players[0].view.down_since = None;
+        engine.players[0].remote_revive_grace_until = 0;
+        engine.players[0].view.x = 11;
+        engine.players[0].view.y = 10;
+        engine.players[0].view.dir = Direction::Right;
+        engine.ghosts[0].view.x = 10;
+        engine.ghosts[0].view.y = 10;
+
+        let mut player_before = BTreeMap::new();
+        player_before.insert(player_id, (10, 10));
+        let mut ghost_before = BTreeMap::new();
+        ghost_before.insert(ghost_id, (11, 10));
+
+        engine.resolve_ghost_collisions(
+            engine.started_at_ms + 1_000,
+            &player_before,
+            &ghost_before,
+        );
+        assert_eq!(engine.players[0].view.state as u8, PlayerState::Down as u8);
+    }
+
+    #[test]
+    fn build_snapshot_drains_events_when_requested() {
+        let mut engine = GameEngine::new(
+            make_players(1),
+            Difficulty::Normal,
+            333,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        engine.events.push(RuntimeEvent::Toast {
+            message: "test".to_string(),
+        });
+
+        let first = engine.build_snapshot(true);
+        let second = engine.build_snapshot(true);
+        assert_eq!(first.events.len(), 1);
+        assert_eq!(second.events.len(), 0);
+    }
 }
