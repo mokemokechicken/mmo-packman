@@ -15,6 +15,14 @@
 - [Cloud Run デプロイ手順](./deployment_cloud_run.md)
 - [運用メモ / バランス調整観点](./operation_notes.md)
 
+## 運用方針（重要）
+
+- [システム設計](./architecture.md)
+  - TypeScript / Rust の dual-backend 前提
+  - 現時点の authoritative path
+  - パリティ方針（互換レベル）
+  - テスト / simulate 実行方針
+
 ## 元のゲームデザイン
 
 - [ゲームデザイン](./game_design.md)
