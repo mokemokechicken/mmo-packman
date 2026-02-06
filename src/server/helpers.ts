@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+let idSequence = 0;
 
 export function keyOf(x: number, y: number): string {
   return `${x},${y}`;
@@ -10,7 +10,8 @@ export function parseKey(key: string): { x: number; y: number } {
 }
 
 export function makeId(prefix: string): string {
-  return `${prefix}_${randomUUID().slice(0, 8)}`;
+  idSequence = (idSequence + 1) >>> 0;
+  return `${prefix}_${idSequence.toString(36).padStart(8, '0')}`;
 }
 
 export function clamp(value: number, min: number, max: number): number {

@@ -68,7 +68,13 @@ npm run simulate
 
 ```bash
 npm run simulate -- --single --ai 5 --minutes 10 --difficulty normal
+npm run simulate -- --single --ai 20 --minutes 10 --difficulty normal --seed 12345
 ```
+
+再現実行メモ:
+
+- `--seed` を指定すると同条件を再現しやすくなる。
+- `--seed` 未指定でも出力JSONに `seed` が出るため、後から同値で再実行できる。
 
 ## 操作方法
 
