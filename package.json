@@ -24,6 +24,7 @@
     "test:server-session": "tsx src/server/session_manager.selftest.ts",
     "test:server-message-parser": "tsx src/server/message_parser.selftest.ts",
     "simulate": "tsx src/server/simulate.ts",
+    "simulate:rust": "cargo run --manifest-path rust/server/Cargo.toml --bin simulate --",
     "start": "node dist/server/server/index.js"
   },
   "dependencies": {
