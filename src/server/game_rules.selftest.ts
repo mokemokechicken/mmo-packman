@@ -16,6 +16,7 @@ function fixedRng(value: number): RandomSource {
 function testPickGhostTypeBoundaries(): void {
   assert.equal(pickGhostType(0.1, fixedRng(0.749)), 'random');
   assert.equal(pickGhostType(0.1, fixedRng(0.75)), 'chaser');
+  assert.equal(pickGhostType(0.3, fixedRng(0.74)), 'patrol');
 
   assert.equal(pickGhostType(0.59, fixedRng(0.299)), 'random');
   assert.equal(pickGhostType(0.59, fixedRng(0.3)), 'chaser');
@@ -23,6 +24,7 @@ function testPickGhostTypeBoundaries(): void {
   assert.equal(pickGhostType(0.59, fixedRng(0.55)), 'patrol');
   assert.equal(pickGhostType(0.59, fixedRng(0.799)), 'patrol');
   assert.equal(pickGhostType(0.59, fixedRng(0.8)), 'pincer');
+  assert.equal(pickGhostType(0.6, fixedRng(0.79)), 'pincer');
 
   assert.equal(pickGhostType(0.89, fixedRng(0.199)), 'random');
   assert.equal(pickGhostType(0.89, fixedRng(0.2)), 'chaser');
