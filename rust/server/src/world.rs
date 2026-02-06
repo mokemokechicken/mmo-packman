@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::constants::{get_map_side_by_player_count, SECTOR_SIZE};
 use crate::rng::Rng;
@@ -31,8 +31,8 @@ pub struct GeneratedWorld {
     pub tiles: Vec<String>,
     pub sectors: Vec<SectorInternal>,
     pub gates: Vec<GateState>,
-    pub dots: HashSet<(i32, i32)>,
-    pub power_pellets: HashMap<String, PowerPelletInternal>,
+    pub dots: BTreeSet<(i32, i32)>,
+    pub power_pellets: BTreeMap<String, PowerPelletInternal>,
     pub player_spawn_cells: Vec<Vec2>,
     pub ghost_spawn_cells: Vec<Vec2>,
 }
@@ -90,7 +90,7 @@ pub fn generate_world(player_count: usize, seed: u32) -> GeneratedWorld {
     }
 
     let mut pellet_keys = HashSet::new();
-    let mut power_pellets = HashMap::new();
+    let mut power_pellets = BTreeMap::new();
     for sector in &mut sectors {
         scan_sector_floor_cells(&grid, sector);
         let pellets = place_sector_power_pellets(sector, &mut rng);
@@ -128,7 +128,7 @@ pub fn generate_world(player_count: usize, seed: u32) -> GeneratedWorld {
     }
 
     let gate_switch_cells = build_gate_switch_cell_set(&gates);
-    let mut dots = HashSet::new();
+    let mut dots = BTreeSet::new();
     for sector in &mut sectors {
         let mut dot_count = 0;
         for cell in &sector.floor_cells {
@@ -294,8 +294,18 @@ fn connect_right(grid: &mut [Vec<char>], row: i32, col: i32, side: i32) -> GateS
     let y_center = row * SECTOR_SIZE + SECTOR_SIZE / 2;
     let x_left = col * SECTOR_SIZE + SECTOR_SIZE - 1;
     let x_right = (col + 1) * SECTOR_SIZE;
+    let switch_a_x = x_left - 2;
+    let switch_b_x = x_right + 2;
     grid[y_center as usize][(x_left - 1) as usize] = '.';
+    grid[y_center as usize][x_left as usize] = '.';
+    grid[y_center as usize][x_right as usize] = '.';
     grid[y_center as usize][(x_right + 1).min(side * SECTOR_SIZE - 1) as usize] = '.';
+    if switch_a_x >= 0 && switch_a_x < side * SECTOR_SIZE {
+        grid[y_center as usize][switch_a_x as usize] = '.';
+    }
+    if switch_b_x >= 0 && switch_b_x < side * SECTOR_SIZE {
+        grid[y_center as usize][switch_b_x as usize] = '.';
+    }
 
     GateState {
         id: format!("gate_{}_{}", row, col),
@@ -308,11 +318,11 @@ fn connect_right(grid: &mut [Vec<char>], row: i32, col: i32, side: i32) -> GateS
             y: y_center,
         },
         switch_a: Vec2 {
-            x: x_left - 2,
+            x: switch_a_x,
             y: y_center,
         },
         switch_b: Vec2 {
-            x: x_right + 2,
+            x: switch_b_x,
             y: y_center,
         },
         open: false,
@@ -324,8 +334,18 @@ fn connect_down(grid: &mut [Vec<char>], row: i32, col: i32, side: i32) -> GateSt
     let x_center = col * SECTOR_SIZE + SECTOR_SIZE / 2;
     let y_top = row * SECTOR_SIZE + SECTOR_SIZE - 1;
     let y_bottom = (row + 1) * SECTOR_SIZE;
+    let switch_a_y = y_top - 2;
+    let switch_b_y = y_bottom + 2;
     grid[(y_top - 1) as usize][x_center as usize] = '.';
+    grid[y_top as usize][x_center as usize] = '.';
+    grid[y_bottom as usize][x_center as usize] = '.';
     grid[(y_bottom + 1).min(side * SECTOR_SIZE - 1) as usize][x_center as usize] = '.';
+    if switch_a_y >= 0 && switch_a_y < side * SECTOR_SIZE {
+        grid[switch_a_y as usize][x_center as usize] = '.';
+    }
+    if switch_b_y >= 0 && switch_b_y < side * SECTOR_SIZE {
+        grid[switch_b_y as usize][x_center as usize] = '.';
+    }
 
     GateState {
         id: format!("gate_{}_{}_down", row, col),
@@ -339,14 +359,38 @@ fn connect_down(grid: &mut [Vec<char>], row: i32, col: i32, side: i32) -> GateSt
         },
         switch_a: Vec2 {
             x: x_center,
-            y: y_top - 2,
+            y: switch_a_y,
         },
         switch_b: Vec2 {
             x: x_center,
-            y: y_bottom + 2,
+            y: switch_b_y,
         },
         open: false,
         permanent: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{generate_world, is_walkable};
+
+    #[test]
+    fn gate_cells_are_walkable_when_generated() {
+        let mut found_gate = false;
+        for seed in 0..200u32 {
+            let world = generate_world(20, seed);
+            if world.gates.is_empty() {
+                continue;
+            }
+            found_gate = true;
+            for gate in &world.gates {
+                assert!(is_walkable(&world, gate.a.x, gate.a.y));
+                assert!(is_walkable(&world, gate.b.x, gate.b.y));
+                assert!(is_walkable(&world, gate.switch_a.x, gate.switch_a.y));
+                assert!(is_walkable(&world, gate.switch_b.x, gate.switch_b.y));
+            }
+        }
+        assert!(found_gate);
     }
 }
 
