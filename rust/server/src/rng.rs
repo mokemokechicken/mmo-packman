@@ -11,7 +11,7 @@ impl Rng {
     pub fn next_f32(&mut self) -> f32 {
         self.seed = self.seed.wrapping_add(0x6d2b79f5);
         let mut t = self.seed;
-        t = ((t ^ (t >> 15)).wrapping_mul(t | 1)) & 0xffff_ffff;
+        t = (t ^ (t >> 15)).wrapping_mul(t | 1);
         t ^= t.wrapping_add((t ^ (t >> 7)).wrapping_mul(t | 61));
         let out = t ^ (t >> 14);
         (out as f64 / 4_294_967_296.0) as f32
