@@ -12,4 +12,4 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 EXPOSE 8080
-CMD ["node", "dist/server/server/index.js"]
+CMD ["sh", "-c", "echo \"Rust WebSocket server is not implemented yet. See docs/deployment_cloud_run.md\" && exit 1"]

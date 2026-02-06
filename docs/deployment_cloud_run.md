@@ -1,46 +1,21 @@
-# Cloud Run デプロイ手順（MVP）
+# Cloud Run デプロイ手順（現状）
 
-このプロトタイプは Cloud Run で動かせます。WebSocket利用のため、Cloud Run のHTTPエンドポイントでそのまま運用可能です。
+## 状況
 
-## 1. Dockerfile
+- TypeScript サーバーは開発停止し、`reference/ts-server/src/server/` へ退避済み。
+- Rust サーバーは現在 simulator / ゲームコア実装までで、WebSocket サーバー本体は未実装。
+- そのため、**現時点では Cloud Run への実プレイ用デプロイ手順は未確立**。
 
-```Dockerfile
-FROM node:20-alpine AS build
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
+## 現時点で実行可能なこと
 
-FROM node:20-alpine
-WORKDIR /app
-ENV NODE_ENV=production
-COPY --from=build /app/package*.json ./
-RUN npm ci --omit=dev
-COPY --from=build /app/dist ./dist
-EXPOSE 8080
-CMD ["node", "dist/server/server/index.js"]
-```
-
-## 2. Build / Push
+- Rust シミュレーターによるバランス/異常検証
 
 ```bash
-gcloud builds submit --tag gcr.io/<PROJECT_ID>/mmo-packman:latest
+npm run simulate -- --single --ai 10 --minutes 10 --difficulty normal
 ```
 
-## 3. Deploy
+## 今後の対応
 
-```bash
-gcloud run deploy mmo-packman \
-  --image gcr.io/<PROJECT_ID>/mmo-packman:latest \
-  --platform managed \
-  --region asia-northeast1 \
-  --allow-unauthenticated \
-  --port 8080
-```
-
-## 4. 補足
-
-- 最小インスタンス数 0 でコストを抑えられます（コールドスタートは増える）
-- MVPではメモリ上で状態管理しているため、インスタンス再起動でゲーム状態は消えます
-- 本番化時はセッション・ルーム管理を外部ストア化してください
+1. Rust WebSocket サーバー実装（Issue [#27](https://github.com/mokemokechicken/mmo-packman/issues/27)）
+2. Cloud Run 向けコンテナの再設計
+3. 本ドキュメントへ本番手順を再記載

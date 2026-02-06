@@ -4,6 +4,7 @@
 
 - サーバーコア（ゲーム進行・AI更新・シミュレータ）を Rust で再実装する。
 - 短時間の負荷検証やバランス検証を Rust バイナリで実行できるようにする。
+- TypeScript サーバーを参考実装化し、Rust への移行を進める。
 
 ## 追加構成
 
@@ -13,7 +14,10 @@
 - `rust/server/src/types.rs`
 - `rust/server/src/rng.rs`
 - `rust/server/src/world.rs`
-- `rust/server/src/engine.rs`
+- `rust/server/src/engine/mod.rs`
+- `rust/server/src/engine/sector_system.rs`
+- `rust/server/src/engine/spawn_system.rs`
+- `rust/server/src/engine/utils.rs`
 - `rust/server/src/bin/simulate.rs`
 
 ## 実装範囲
@@ -48,5 +52,6 @@ npm run simulate:rust -- --single --ai 10 --minutes 10 --difficulty normal
 
 ## 既知事項
 
-- 現時点では Rust 側は simulator/ゲームコアを優先し、TypeScript の WebSocket サーバー完全互換までは行っていない。
+- 現時点では Rust 側は simulator/ゲームコアを優先し、WebSocket サーバー本体は未実装。
+- TypeScript サーバーは `reference/ts-server/src/server/` に退避済み（参考実装）。
 - まず AI-only テストプレイの再現を Rust 側で成立させることを優先した。

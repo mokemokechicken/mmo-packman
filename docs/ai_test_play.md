@@ -11,13 +11,10 @@
 - `AI x2` : 簡易動作確認（2〜5分）
 - `AI x5` : バランス初期確認（5〜10分）
 
-## UIで実施
+## UIで実施（準備中）
 
-1. `npm run dev`
-2. ブラウザで `http://localhost:5173`
-3. `参加モード: 観戦`
-4. `AIプレイヤー数` と `テスト時間` を設定
-5. Host で `テスト開始`
+- Rust WebSocket サーバーが未実装のため、現在は UI 実施は準備中。
+- 追跡Issue: [#27](https://github.com/mokemokechicken/mmo-packman/issues/27)
 
 ## CLIで実施
 
