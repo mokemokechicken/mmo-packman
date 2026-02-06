@@ -1,0 +1,50 @@
+{
+  "tickRate": 20,
+  "sectorSize": 17,
+  "dotsForAwaken": 50,
+  "maxAwakenStock": 3,
+  "powerDurationMs": 8000,
+  "awakenDurationMs": 6000,
+  "rescueTimeoutMs": 30000,
+  "powerPelletRespawnMs": 90000,
+  "playerBaseSpeed": 6.0,
+  "playerCapturedSpeedMultiplier": 1.2,
+  "ghostBaseSpeed": 4.6,
+  "powerAuraRadius": 5,
+  "mapSideByPlayers": [
+    { "maxPlayers": 5, "value": 2 },
+    { "maxPlayers": 15, "value": 3 },
+    { "maxPlayers": 30, "value": 4 },
+    { "maxPlayers": 60, "value": 5 }
+  ],
+  "mapSideDefault": 6,
+  "initialGhostCountByPlayers": [
+    { "maxPlayers": 1, "value": 4 },
+    { "maxPlayers": 5, "value": 8 },
+    { "maxPlayers": 15, "value": 20 },
+    { "maxPlayers": 30, "value": 40 },
+    { "maxPlayers": 60, "value": 65 }
+  ],
+  "initialGhostCountDefault": 100,
+  "timeLimitMsByPlayers": [
+    { "maxPlayers": 5, "value": 900000 },
+    { "maxPlayers": 15, "value": 1080000 },
+    { "maxPlayers": 30, "value": 1320000 },
+    { "maxPlayers": 60, "value": 1560000 }
+  ],
+  "timeLimitMsDefault": 1800000,
+  "difficultyMultipliers": {
+    "casual": { "ghostSpeed": 0.8, "maintenance": 0.6 },
+    "normal": { "ghostSpeed": 1.0, "maintenance": 1.0 },
+    "hard": { "ghostSpeed": 1.2, "maintenance": 1.4 },
+    "nightmare": { "ghostSpeed": 1.5, "maintenance": 2.0 }
+  },
+  "capturePressure": [
+    { "maxCaptureRatio": 0.3, "graceMs": 120000, "regenMultiplier": 1.0 },
+    { "maxCaptureRatio": 0.5, "graceMs": 90000, "regenMultiplier": 1.3 },
+    { "maxCaptureRatio": 0.7, "graceMs": 60000, "regenMultiplier": 1.8 },
+    { "maxCaptureRatio": 0.85, "graceMs": 40000, "regenMultiplier": 2.5 },
+    { "maxCaptureRatio": 0.95, "graceMs": 25000, "regenMultiplier": 3.5 }
+  ],
+  "capturePressureDefault": { "graceMs": 15000, "regenMultiplier": 5.0 }
+}
