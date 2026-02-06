@@ -11,9 +11,11 @@
     "build:client": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
     "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit",
-    "test": "npm run test:client-parser && npm run test:server-loop",
+    "test": "npm run test:client-parser && npm run test:server-loop && npm run test:server-game && npm run test:server-reconnect",
     "test:client-parser": "tsx src/client/parseServerMessage.selftest.ts",
     "test:server-loop": "tsx src/server/loop.selftest.ts",
+    "test:server-game": "tsx src/server/game.selftest.ts",
+    "test:server-reconnect": "tsx src/server/reconnect.selftest.ts",
     "simulate": "tsx src/server/simulate.ts",
     "start": "node dist/server/server/index.js"
   },
