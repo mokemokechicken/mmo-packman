@@ -35,6 +35,8 @@ interface TestEngine {
     playerPositionsBeforeMove: Map<string, { x: number; y: number }>,
     ghostPositionsBeforeMove: Map<string, { x: number; y: number }>,
   ) => void;
+  updatePowerPellets: (nowMs: number) => void;
+  isSafeRespawnCell: (cell: { x: number; y: number }, playerId: string) => boolean;
   isValidDotRespawnCell: (sectorId: number, x: number, y: number) => boolean;
   autoRespawn: (player: any, nowMs: number) => void;
 }
@@ -200,8 +202,78 @@ function testRespawnCellValidation(): void {
   }
 }
 
+function testPowerPelletRespawnValidation(): void {
+  {
+    const engine = createEngine(16);
+    const sector = engine.world.sectors[0];
+    assert.ok(sector);
+    const cell = findBaselineRespawnCell(engine, sector.id);
+    const key = keyOf(cell.x, cell.y);
+
+    engine.world.powerPellets.set(key, {
+      key,
+      x: cell.x,
+      y: cell.y,
+      active: false,
+      respawnAt: engine.startedAtMs - 1,
+    });
+    engine.updatePowerPellets(engine.startedAtMs);
+    assert.equal(engine.world.powerPellets.get(key)?.active, true);
+  }
+
+  {
+    const engine = createEngine(17);
+    const sector = engine.world.sectors[0];
+    assert.ok(sector);
+    const cell = findBaselineRespawnCell(engine, sector.id);
+    const key = keyOf(cell.x, cell.y);
+
+    engine.world.gates.push({
+      id: 'pellet_gate_test',
+      a: { x: cell.x, y: cell.y },
+      b: { x: cell.x, y: cell.y },
+      switchA: { x: cell.x, y: cell.y },
+      switchB: { x: cell.x, y: cell.y },
+      open: false,
+      permanent: false,
+    });
+    engine.world.powerPellets.set(key, {
+      key,
+      x: cell.x,
+      y: cell.y,
+      active: false,
+      respawnAt: engine.startedAtMs - 1,
+    });
+
+    engine.updatePowerPellets(engine.startedAtMs);
+    assert.equal(engine.world.powerPellets.get(key)?.active, false);
+    assert.ok((engine.world.powerPellets.get(key)?.respawnAt ?? 0) > engine.startedAtMs);
+  }
+}
+
+function testSafeRespawnCellValidation(): void {
+  const engine = createEngine(18);
+  const sector = engine.world.sectors[0];
+  assert.ok(sector);
+  const cell = findBaselineRespawnCell(engine, sector.id);
+
+  engine.ghosts.clear();
+  assert.equal(engine.isSafeRespawnCell(cell, 'p1'), true);
+
+  engine.world.gates.push({
+    id: 'safe_respawn_gate_test',
+    a: { x: cell.x, y: cell.y },
+    b: { x: cell.x, y: cell.y },
+    switchA: { x: cell.x, y: cell.y },
+    switchB: { x: cell.x, y: cell.y },
+    open: false,
+    permanent: false,
+  });
+  assert.equal(engine.isSafeRespawnCell(cell, 'p1'), false);
+}
+
 function testAutoRespawnGrace(): void {
-  const engine = createEngine(17);
+  const engine = createEngine(19);
   const player = engine.players.get('p1');
   assert.ok(player);
   const firstGhost = keepSingleGhost(engine);
@@ -270,6 +342,8 @@ function testStepAutoRespawnIntegration(): void {
 function run(): void {
   testSwapCollision();
   testRespawnCellValidation();
+  testPowerPelletRespawnValidation();
+  testSafeRespawnCellValidation();
   testAutoRespawnGrace();
   testStepCollisionIntegration();
   testStepAutoRespawnIntegration();
