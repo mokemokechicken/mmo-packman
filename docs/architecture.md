@@ -75,4 +75,6 @@ Game Server (authoritative)
 - `src/shared/types.ts` にプロトコルを集約
 - `GameEngine` にゲームルールを集約
 - ワールド生成は `world.ts` として分離
+- `message_parser.ts` で受信メッセージ検証を分離
+- `session_manager.ts` で接続/バインド管理を分離
 - AI-only検証は `src/server/simulate.ts` で独立実行
