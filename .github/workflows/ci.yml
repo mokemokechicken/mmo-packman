@@ -32,6 +32,7 @@ jobs:
           const scripts = pkg.scripts || {};
           console.log(`has_test=${Boolean(scripts.test)}`);
           console.log(`has_simulate_rust=${Boolean(scripts['simulate:rust'])}`);
+          console.log(`has_test_parity=${Boolean(scripts['test:parity'])}`);
           NODE
 
       - name: Type check
@@ -71,6 +72,26 @@ jobs:
             exit 1
           fi
 
+      - name: Validate parity harness script
+        if: ${{ hashFiles('rust/server/Cargo.toml') != '' }}
+        run: |
+          if [ "${{ steps.detect_scripts.outputs.has_test_parity }}" != "true" ]; then
+            echo "test:parity script is required when rust/server/Cargo.toml exists."
+            exit 1
+          fi
+
       - name: Rust simulate smoke
         if: ${{ hashFiles('rust/server/Cargo.toml') != '' }}
         run: npm run simulate:rust -- --single --ai 2 --minutes 1 --difficulty normal --seed 12345
+
+      - name: TS/Rust parity smoke
+        if: ${{ hashFiles('rust/server/Cargo.toml') != '' }}
+        continue-on-error: true
+        run: npm run test:parity -- --seed-start 5000 --seed-count 4 --ai 5 --minutes 1 --difficulty normal --report-file parity-report.json
+
+      - name: Upload parity report
+        if: ${{ always() && hashFiles('parity-report.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-report
+          path: parity-report.json

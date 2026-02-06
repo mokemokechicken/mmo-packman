@@ -12,6 +12,7 @@
 
 - [サーバー/クライアント通信プロトコル](./server_protocol.md)
 - [AI-only テストプレイ手順](./ai_test_play.md)
+- [TS/Rust パリティ検証ハーネス](./parity_harness.md)
 - [Rust サーバー再実装メモ](./rust_server_reimplementation.md)
 - [Cloud Run デプロイ手順](./deployment_cloud_run.md)
 - [運用メモ / バランス調整観点](./operation_notes.md)

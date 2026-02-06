@@ -83,5 +83,6 @@ Rust Server (compatibility target)
 ## テスト/シミュレーション方針
 
 - TypeScript: `npm run check`, `npm run build`, `npm run simulate`
-- Rust実装がある場合: `cargo fmt/clippy/test` と `simulate:rust` を追加で実行
-- CIは上記を自動実行し、再現性確保のためsimulateは固定seedを利用する。
+- Rust実装がある場合: `cargo fmt/clippy/test` と `simulate:rust`、`test:parity` を追加で実行
+- CIは上記を自動実行し、再現性確保のため simulate / parity は固定seedを利用する。
+- parity は当面 non-blocking で回し、差分レポートをartifactとして収集する。
