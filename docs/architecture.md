@@ -46,6 +46,13 @@ Game Server (authoritative)
 
 ## ティック処理順
 
+ループ制御:
+
+- `setInterval` はトリガーとして使い、`performance.now()` + accumulator で fixed-step (`TICK_MS`) を実行
+- 遅延時は1ループ内で複数stepを消化し、実時間追従する
+- 1ループあたりの最大stepを制限して過負荷連鎖を防止する
+- step上限到達で backlog が残る場合は tick 境界まで圧縮し、安定性を優先する
+
 1. ゲート更新
 2. パワーエサ再出現判定
 3. フルーツスポーン
