@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { TICK_MS } from '../shared/constants.js';
 import type { Difficulty, Snapshot } from '../shared/types.js';
 import { GameEngine, type StartPlayer } from './game.js';
@@ -8,10 +7,12 @@ interface Scenario {
   aiPlayers: number;
   minutes: number;
   difficulty: Difficulty;
+  seed: number;
 }
 
 interface ScenarioResult {
   scenario: Scenario;
+  seed: number;
   ticks: number;
   ended: boolean;
   reason: string;
@@ -46,11 +47,11 @@ function runScenario(scenario: Scenario): ScenarioResult {
   const startPlayers: StartPlayer[] = Array.from({ length: scenario.aiPlayers }, (_, idx) => ({
     id: `ai_${idx + 1}`,
     name: `AI-${(idx + 1).toString().padStart(2, '0')}`,
-    reconnectToken: randomUUID(),
+    reconnectToken: `sim_${scenario.seed}_${idx + 1}`,
     connected: false,
   }));
 
-  const engine = new GameEngine(startPlayers, scenario.difficulty, Date.now(), {
+  const engine = new GameEngine(startPlayers, scenario.difficulty, scenario.seed, {
     timeLimitMsOverride: scenario.minutes * 60_000,
   });
 
@@ -114,6 +115,7 @@ function runScenario(scenario: Scenario): ScenarioResult {
 
   return {
     scenario,
+    seed: scenario.seed,
     ticks,
     ended: engine.isEnded(),
     reason: summary.reason,
@@ -169,6 +171,7 @@ function validateSnapshot(snapshot: Snapshot, anomalies: string[]): void {
 function printScenarioResult(result: ScenarioResult): void {
   const line = {
     scenario: result.scenario.name,
+    seed: result.seed,
     aiPlayers: result.scenario.aiPlayers,
     minutes: result.scenario.minutes,
     difficulty: result.scenario.difficulty,
@@ -193,6 +196,7 @@ function resolveScenarios(args: string[]): Scenario[] {
   const ai = readArgNumber(args, '--ai');
   const minutes = readArgNumber(args, '--minutes');
   const difficulty = (readArgString(args, '--difficulty') as Difficulty | null) ?? 'normal';
+  const baseSeed = parseSeedOrExit(args);
 
   if (ai !== null || minutes !== null || args.includes('--single')) {
     return [
@@ -201,13 +205,14 @@ function resolveScenarios(args: string[]): Scenario[] {
         aiPlayers: clamp(ai ?? 2, 1, 100),
         minutes: clamp(minutes ?? 3, 1, 10),
         difficulty,
+        seed: baseSeed,
       },
     ];
   }
 
   return [
-    { name: 'quick-check-ai2', aiPlayers: 2, minutes: 2, difficulty: 'normal' },
-    { name: 'balance-check-ai5', aiPlayers: 5, minutes: 5, difficulty: 'normal' },
+    { name: 'quick-check-ai2', aiPlayers: 2, minutes: 2, difficulty: 'normal', seed: baseSeed },
+    { name: 'balance-check-ai5', aiPlayers: 5, minutes: 5, difficulty: 'normal', seed: nextSeed(baseSeed, 1) },
   ];
 }
 
@@ -230,4 +235,33 @@ function readArgString(args: string[], name: string): string | null {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.floor(value)));
+}
+
+function parseSeedOrExit(args: string[]): number {
+  const idx = args.indexOf('--seed');
+  if (idx < 0) {
+    return normalizeSeed(Date.now());
+  }
+
+  const rawValue = args[idx + 1];
+  if (!rawValue) {
+    console.error('ERROR: --seed requires a numeric value');
+    process.exit(1);
+  }
+
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed)) {
+    console.error(`ERROR: --seed must be a number, got "${rawValue}"`);
+    process.exit(1);
+  }
+
+  return normalizeSeed(parsed);
+}
+
+function normalizeSeed(seed: number): number {
+  return Math.floor(seed) >>> 0;
+}
+
+function nextSeed(seed: number, offset: number): number {
+  return normalizeSeed(seed + offset);
 }

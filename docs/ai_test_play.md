@@ -34,6 +34,18 @@ npm run simulate -- --single --ai 2 --minutes 5 --difficulty normal
 npm run simulate -- --single --ai 5 --minutes 10 --difficulty normal
 ```
 
+### seed 指定で再現実行
+
+```bash
+npm run simulate -- --single --ai 20 --minutes 10 --difficulty normal --seed 12345
+npm run simulate -- --seed 12345
+```
+
+- 出力 JSON の `seed` を保存しておくと、同条件で再現できる。
+- `--seed` 未指定時も、実際に使われた `seed` は結果に出力される。
+- デフォルト2シナリオ時は `seed=base` と `seed=base+1` が使われる。
+- `--seed` は `uint32 (0..4294967295)` として正規化して利用される。
+
 ## 出力の見方
 
 JSON 1行ごとに1シナリオ結果を出す。
@@ -41,6 +53,7 @@ JSON 1行ごとに1シナリオ結果を出す。
 主要フィールド:
 
 - `reason`: 終了理由 (`victory|timeout|all_down|collapse`)
+- `seed`: 実行に使った乱数seed（再現実行用）
 - `maxCapture`: 最大制覇率
 - `minCaptureAfter70`: 制覇率70%到達後の最低制覇率
 - `downs`, `rescues`: 被弾と立て直し傾向
