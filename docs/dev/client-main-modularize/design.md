@@ -14,6 +14,7 @@
 2. `src/client/network.ts`
    - WebSocket 接続、再接続、メッセージ parse
    - `ClientMessage` の送信
+   - `connect()` の冪等性確保と `disconnect()` 時の再接続抑止
 3. `src/client/renderer.ts`
    - Canvas 描画
    - プレイヤー/ゴースト補間状態の更新
@@ -34,3 +35,9 @@
 
 - サーバー通信フォーマットは変更しない。
 - UI表示内容と操作キー体系は維持する。
+
+## テスト方針
+
+- 既存 `parseServerMessage` selftest に加え、以下を追加する。
+  - `src/client/state.selftest.ts`: event適用と観戦フォーカス解決
+  - `src/client/network.selftest.ts`: 再接続制御と `connect()` 冪等性

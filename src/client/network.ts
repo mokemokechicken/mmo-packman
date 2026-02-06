@@ -20,6 +20,7 @@ export interface NetworkOptions {
 export class NetworkClient {
   private ws: WebSocket | null = null;
   private reconnectTimer: number | null = null;
+  private reconnectEnabled = true;
   private readonly reconnectDelayMs: number;
   private readonly wsUrlFactory: () => string;
 
@@ -32,6 +33,16 @@ export class NetworkClient {
   }
 
   public connect(): void {
+    if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
+      return;
+    }
+
+    this.reconnectEnabled = true;
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
     const url = this.wsUrlFactory();
     this.ws = new WebSocket(url);
 
@@ -49,10 +60,14 @@ export class NetworkClient {
     });
 
     this.ws.addEventListener('close', (event) => {
+      this.ws = null;
       this.callbacks.onConnectionClosed();
 
       if (event.code === 4001) {
         this.callbacks.onConnectionReplaced();
+        return;
+      }
+      if (!this.reconnectEnabled) {
         return;
       }
 
@@ -73,11 +88,15 @@ export class NetworkClient {
   }
 
   public disconnect(): void {
+    this.reconnectEnabled = false;
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    this.ws?.close(1000, 'client_disconnect');
+
+    if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
+      this.ws.close(1000, 'client_disconnect');
+    }
     this.ws = null;
   }
 }
