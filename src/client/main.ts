@@ -12,6 +12,7 @@ import type {
   Snapshot,
   WorldInit,
 } from '../shared/types.js';
+import { parseServerMessage } from './parseServerMessage.js';
 
 const canvas = mustElement<HTMLCanvasElement>('game');
 const hud = mustElement<HTMLElement>('hud');
@@ -79,8 +80,9 @@ function connect(): void {
   });
 
   ws.addEventListener('message', (event) => {
-    const msg = safeParse(event.data.toString());
+    const msg = parseServerMessage(event.data.toString());
     if (!msg) {
+      pushLog('WARN: 不正なサーバーメッセージを破棄');
       return;
     }
     handleServerMessage(msg);
@@ -121,14 +123,6 @@ function wsUrl(): string {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const port = window.location.port === '5173' ? '8080' : window.location.port;
   return `${proto}//${window.location.hostname}${port ? `:${port}` : ''}/ws`;
-}
-
-function safeParse(raw: string): ServerMessage | null {
-  try {
-    return JSON.parse(raw) as ServerMessage;
-  } catch {
-    return null;
-  }
 }
 
 function handleServerMessage(message: ServerMessage): void {
@@ -539,10 +533,11 @@ function updateTopStatus(): void {
   }
 
   const ratio = focus.gaugeMax > 0 ? (focus.gauge / focus.gaugeMax) * 100 : 0;
+  const safeStocks = Math.max(0, Math.min(20, Math.floor(focus.stocks)));
   const title = isSpectator ? `観戦: ${escapeHtml(focus.name)}` : `覚醒: ${escapeHtml(focus.name)}`;
   topStatus.innerHTML = `
     <div class="status-title">${title}</div>
-    <div class="stock-line">Stock ${'★'.repeat(focus.stocks)}${'☆'.repeat(Math.max(0, 3 - focus.stocks))}</div>
+    <div class="stock-line">Stock ${'★'.repeat(safeStocks)}${'☆'.repeat(Math.max(0, 3 - safeStocks))}</div>
     <div class="gauge-wrap"><div class="gauge-fill" style="width:${ratio.toFixed(1)}%"></div></div>
     <div class="gauge-text">${focus.gauge}/${focus.gaugeMax}</div>
   `;
@@ -635,7 +630,10 @@ function draw(): void {
   const maxY = Math.min(world.height - 1, Math.ceil(centerY + visibleRows / 2));
 
   for (let y = minY; y <= maxY; y += 1) {
-    const row = world.tiles[y] as string;
+    const row = world.tiles[y] as string | undefined;
+    if (!row) {
+      continue;
+    }
     for (let x = minX; x <= maxX; x += 1) {
       const sx = originX + x * tileSize;
       const sy = originY + y * tileSize;
