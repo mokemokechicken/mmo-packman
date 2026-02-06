@@ -19,6 +19,7 @@
 - `rust/server/src/engine/spawn_system.rs`
 - `rust/server/src/engine/utils.rs`
 - `rust/server/src/bin/simulate.rs`
+- `rust/server/src/bin/server.rs`
 
 ## 実装範囲
 
@@ -37,6 +38,10 @@
   - `--single --ai --minutes --difficulty --seed` の引数対応
   - JSON 1行出力
   - 異常検知 (`anomalies`)
+- WebSocket サーバー
+  - `/ws`, `/healthz` の提供
+  - ロビー/ゲーム進行/再接続/観戦を実装
+  - `docs/server_protocol.md` 準拠メッセージ対応
 
 ## 実行方法
 
@@ -50,8 +55,19 @@ cargo run --manifest-path rust/server/Cargo.toml --bin simulate -- --single --ai
 npm run simulate:rust -- --single --ai 10 --minutes 10 --difficulty normal
 ```
 
+WebSocket サーバー起動:
+
+```bash
+cargo run --manifest-path rust/server/Cargo.toml --bin server
+```
+
+または npm script:
+
+```bash
+npm run start:rust-server
+```
+
 ## 既知事項
 
-- 現時点では Rust 側は simulator/ゲームコアを優先し、WebSocket サーバー本体は未実装。
 - TypeScript サーバーは `reference/ts-server/src/server/` に退避済み（参考実装）。
-- まず AI-only テストプレイの再現を Rust 側で成立させることを優先した。
+- ルームID複数同時試合、AOI配信、永続ランキングなどは未実装（別Issueで対応）。

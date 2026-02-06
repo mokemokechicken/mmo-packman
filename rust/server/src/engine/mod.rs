@@ -193,6 +193,42 @@ impl GameEngine {
             .map(|player| player.reconnect_token.clone())
     }
 
+    pub fn has_player(&self, player_id: &str) -> bool {
+        self.players
+            .iter()
+            .any(|player| player.view.id == player_id)
+    }
+
+    pub fn set_player_connection(&mut self, player_id: &str, connected: bool) {
+        if let Some(player) = self
+            .players
+            .iter_mut()
+            .find(|player| player.view.id == player_id)
+        {
+            player.view.connected = connected;
+            player.view.ai = !connected;
+        }
+    }
+
+    pub fn receive_input(&mut self, player_id: &str, dir: Option<Direction>, awaken: Option<bool>) {
+        let Some(player) = self
+            .players
+            .iter_mut()
+            .find(|player| player.view.id == player_id)
+        else {
+            return;
+        };
+        if player.view.ai {
+            return;
+        }
+        if let Some(direction) = dir {
+            player.desired_dir = direction;
+        }
+        if awaken.unwrap_or(false) {
+            player.awaken_requested = true;
+        }
+    }
+
     pub fn step(&mut self, dt_ms: u64) {
         if self.ended {
             return;

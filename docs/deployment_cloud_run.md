@@ -1,21 +1,38 @@
-# Cloud Run デプロイ手順（現状）
+# Cloud Run デプロイ手順
 
-## 状況
+## 前提
 
-- TypeScript サーバーは開発停止し、`reference/ts-server/src/server/` へ退避済み。
-- Rust サーバーは現在 simulator / ゲームコア実装までで、WebSocket サーバー本体は未実装。
-- そのため、**現時点では Cloud Run への実プレイ用デプロイ手順は未確立**。
+- Rust WebSocket サーバー (`rust/server/src/bin/server.rs`) を Cloud Run にデプロイする。
+- コンテナ起動時は `PORT` 環境変数（Cloud Run が注入）で待受する。
 
-## 現時点で実行可能なこと
-
-- Rust シミュレーターによるバランス/異常検証
+## ローカル確認
 
 ```bash
-npm run simulate -- --single --ai 10 --minutes 10 --difficulty normal
+docker build -t mmo-packman-rust-server .
+docker run --rm -p 8080:8080 mmo-packman-rust-server
 ```
 
-## 今後の対応
+確認:
 
-1. Rust WebSocket サーバー実装（Issue [#27](https://github.com/mokemokechicken/mmo-packman/issues/27)）
-2. Cloud Run 向けコンテナの再設計
-3. 本ドキュメントへ本番手順を再記載
+```bash
+curl -s http://localhost:8080/healthz
+```
+
+## Cloud Run デプロイ
+
+```bash
+gcloud run deploy mmo-packman-rust-server \
+  --source . \
+  --region asia-northeast1 \
+  --allow-unauthenticated
+```
+
+## 動作確認
+
+- health check: `GET /healthz`
+- WebSocket: `/ws`
+
+## 補足
+
+- 現在の Dockerfile は Rust `server` バイナリのみを実行する。
+- 静的フロント配信は別ホスティング（または別サービス）で運用する前提。
