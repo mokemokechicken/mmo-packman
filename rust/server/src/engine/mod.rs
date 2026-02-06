@@ -1141,6 +1141,31 @@ mod tests {
     }
 
     #[test]
+    fn ai_holds_position_when_already_on_downed_player() {
+        let mut engine = GameEngine::new(
+            make_players(2),
+            Difficulty::Normal,
+            2_006,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        engine.ghosts.clear();
+
+        engine.players[0].view.x = 10;
+        engine.players[0].view.y = 10;
+        engine.players[0].view.state = PlayerState::Normal;
+        engine.players[0].ai_think_at = 0;
+        engine.players[1].view.state = PlayerState::Down;
+        engine.players[1].view.down_since = Some(engine.started_at_ms);
+        engine.players[1].view.x = 10;
+        engine.players[1].view.y = 10;
+
+        engine.update_player_ai(0, engine.started_at_ms + 1_000);
+        assert_eq!(engine.players[0].desired_dir as u8, Direction::None as u8);
+    }
+
+    #[test]
     fn ai_power_state_keeps_chase_behavior() {
         let mut engine = GameEngine::new(
             make_players(1),

@@ -225,6 +225,9 @@ impl GameEngine {
         tx: i32,
         ty: i32,
     ) -> Direction {
+        if x == tx && y == ty {
+            return Direction::None;
+        }
         let dirs = [
             Direction::Up,
             Direction::Down,
