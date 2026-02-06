@@ -1,28 +1,39 @@
 # システム設計
 
-## 全体構成
+## 全体構成（dual-backend）
 
 - Client: TypeScript + Vite + Canvas
-- Server: Node.js (TypeScript), Express, ws
+- Server (TypeScript): `src/server/`（現在の標準実装）
+- Server (Rust): `rust/server/`（導入時にTS実装と仕様互換を目指す）
 - 通信: JSON over WebSocket
 
 ```text
 Browser Client (Player / Spectator)
   -> WebSocket (/ws)
-Game Server (authoritative)
+TypeScript Server (authoritative, current default)
   - Lobby / Match lifecycle
   - 20Hz game loop
   - Map / Player / Ghost simulation
+
+Rust Server (compatibility target)
+  - Same game contract / simulation semantics
 ```
+
+## Authoritative Path（2026-02-07 時点）
+
+- 標準運用は TypeScript サーバー (`src/server/`)。
+- クライアントが参照するプロトコルの正は `src/shared/types.ts`。
+- Rust 側を使う場合も、プロトコルと主要ゲーム挙動をTS側へ合わせる。
 
 ## ディレクトリ構成
 
-- `src/shared/` 共通型・定数
-- `src/server/` サーバー実装
+- `src/shared/` 共通型・定数（クライアントとTSサーバーの契約）
+- `src/server/` TypeScript サーバー実装
 - `src/client/` クライアント実装
+- `rust/server/` Rust サーバー実装（存在する場合）
 - `docs/` ドキュメント
 
-## サーバー責務
+## サーバー責務（TS/Rust共通）
 
 - ロビー管理（ホスト、開始、再接続、観戦）
 - AI-only試合の組成（AI人数指定）
@@ -44,7 +55,7 @@ Game Server (authoritative)
 - HUD / ロビー / リザルト表示
 - 観戦カメラ（追従対象切替）
 
-## ティック処理順
+## ティック処理順（互換対象）
 
 1. ゲート更新
 2. パワーエサ再出現判定
@@ -57,15 +68,20 @@ Game Server (authoritative)
 9. マイルストーン記録
 10. 勝敗判定
 
+## パリティ方針（TS/Rust）
+
+- プロトコル互換: `snapshot/events/summary` のJSON構造は互換を維持する。
+- ルール互換: ゲート通行、capture/regen、respawn、終了条件など主要仕様は一致させる。
+- 検証互換: 同条件シミュレーションで異常検知（NaN, 範囲外値, 不整合）が出ないことを最優先にする。
+
 ## データ方針
 
-- サーバーが唯一の正とする（authoritative）
-- クライアントは描画専用キャッシュを保持
-- ドット/パワーエサは `game_init + event delta` で反映
+- サーバーが唯一の正とする（authoritative）。
+- クライアントは描画専用キャッシュを保持。
+- ドット/パワーエサは `game_init + event delta` で反映。
 
-## 拡張しやすさのポイント
+## テスト/シミュレーション方針
 
-- `src/shared/types.ts` にプロトコルを集約
-- `GameEngine` にゲームルールを集約
-- ワールド生成は `world.ts` として分離
-- AI-only検証は `src/server/simulate.ts` で独立実行
+- TypeScript: `npm run check`, `npm run build`, `npm run simulate`
+- Rust実装がある場合: `cargo fmt/clippy/test` と `simulate:rust` を追加で実行
+- CIは上記を自動実行し、再現性確保のためsimulateは固定seedを利用する。
