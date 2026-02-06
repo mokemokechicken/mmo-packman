@@ -11,6 +11,8 @@
     "build:client": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
     "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "test": "npm run test:client-parser",
+    "test:client-parser": "tsx src/client/parseServerMessage.selftest.ts",
     "simulate": "tsx src/server/simulate.ts",
     "start": "node dist/server/server/index.js"
   },
