@@ -4,6 +4,7 @@
 
 - Node.js 20+
 - npm
+- Rust toolchain（`cargo`）
 
 ## セットアップ
 
@@ -11,16 +12,14 @@
 npm install
 ```
 
-## 開発起動
+## クライアント開発起動
 
 ```bash
 npm run dev
 ```
 
-- サーバー: `http://localhost:8080`
 - クライアント(Vite): `http://localhost:5173`
-
-Viteで開いた場合、クライアントは自動で `ws://localhost:8080/ws` に接続します。
+- 現在このコマンドでサーバーは起動しない（TSサーバーは退避済み）。
 
 ## ビルド
 
@@ -31,13 +30,6 @@ npm run build
 生成物:
 
 - `dist/client/`
-- `dist/server/`
-
-## 本番起動（ローカル確認）
-
-```bash
-npm run start
-```
 
 ## 型チェック
 
@@ -45,13 +37,19 @@ npm run start
 npm run check
 ```
 
-## AI-onlyテストプレイ（UI）
+## Node側テスト
 
-1. ブラウザで `http://localhost:5173` を開く
-2. 参加モードを `観戦` にする
-3. `AIプレイヤー数` を設定（例: `2`, `5`）
-4. `テスト時間` を設定（`1〜10`分）
-5. Host で `テスト開始`
+```bash
+npm run test
+```
+
+## Rust テスト
+
+```bash
+cargo fmt --manifest-path rust/server/Cargo.toml --all --check
+cargo clippy --manifest-path rust/server/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path rust/server/Cargo.toml --all-targets
+```
 
 ## AI-onlyテストプレイ（CLI）
 
@@ -59,24 +57,19 @@ npm run check
 npm run simulate
 ```
 
-デフォルト実行:
-
-- `quick-check-ai2` (2分)
-- `balance-check-ai5` (5分)
-
 カスタム実行例:
 
 ```bash
 npm run simulate -- --single --ai 5 --minutes 10 --difficulty normal
 ```
 
-## 操作方法
+## 参考: 退避した TypeScript 実装を実行
 
-プレイヤーモード:
+```bash
+npm run reference:ts:simulate -- --single --ai 5 --minutes 3 --difficulty normal
+```
 
-- `Arrow` or `WASD`: 移動
-- `Space` / `E` / `Enter`: 覚醒
+## 注意
 
-観戦モード:
-
-- `Tab`: 追従対象の切り替え
+- Rust WebSocket サーバーは未実装のため、UI からの実プレイは現時点では未対応。
+- 追跡Issue: [#27](https://github.com/mokemokechicken/mmo-packman/issues/27)

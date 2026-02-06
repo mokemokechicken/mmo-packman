@@ -1,5 +1,8 @@
 # MVP仕様と実装状況
 
+> 2026-02-07 更新: TypeScript サーバー開発は停止し、`reference/ts-server/src/server/` へ退避。  
+> 現行の開発対象は Rust サーバー (`rust/server/`)。
+
 ## ゴール
 
 - Webブラウザで実際に遊べる状態を最優先に実装
@@ -10,7 +13,7 @@
 
 ### サーバー
 
-- TypeScript + Node.js + WebSocket (`ws`) + Express
+- TypeScript + Node.js + WebSocket (`ws`) + Express（**参考実装として退避済み**）
 - 20Hz ティックでゲーム進行
 - ロビー機能
   - 名前入力
@@ -67,7 +70,7 @@
 
 ### テストプレイ支援
 
-- `npm run simulate` で AI-only シナリオ検証
+- `npm run simulate`（Rust 実装）で AI-only シナリオ検証
   - `AI x2`（短時間の動作確認）
   - `AI x5`（バランス初期確認）
 - 異常検知（NaN座標、不正ステータスなど）

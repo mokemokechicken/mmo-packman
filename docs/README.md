@@ -12,8 +12,17 @@
 
 - [サーバー/クライアント通信プロトコル](./server_protocol.md)
 - [AI-only テストプレイ手順](./ai_test_play.md)
+- [Rust サーバー再実装メモ](./rust_server_reimplementation.md)
+- [TypeScript サーバー参考実装の退避メモ](./ts_server_archive.md)
 - [Cloud Run デプロイ手順](./deployment_cloud_run.md)
 - [運用メモ / バランス調整観点](./operation_notes.md)
+
+## 運用方針（重要）
+
+- [システム設計](./architecture.md)
+  - Rust サーバー開発を主軸にする前提
+  - 現時点の authoritative path
+  - テスト / simulate 実行方針
 
 ## 元のゲームデザイン
 

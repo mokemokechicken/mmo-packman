@@ -9,6 +9,7 @@ import type {
   Vec2,
   WorldInit,
 } from '../shared/types.js';
+import { buildGateSwitchCellSet } from './gate_utils.js';
 import { keyOf, manhattan, makeId } from './helpers.js';
 import { Rng } from './rng.js';
 
@@ -169,21 +170,13 @@ export function generateWorld(playerCount: number, seed = Date.now()): Generated
     }
   }
 
-  const switchCells = new Set<string>();
-  const gateCells = new Set<string>();
-  for (const gate of gates) {
-    switchCells.add(keyOf(gate.switchA.x, gate.switchA.y));
-    switchCells.add(keyOf(gate.switchB.x, gate.switchB.y));
-    gateCells.add(keyOf(gate.a.x, gate.a.y));
-    gateCells.add(keyOf(gate.b.x, gate.b.y));
-  }
-
   const dots = new Set<string>();
+  const gateSwitchCells = buildGateSwitchCellSet(gates);
   for (const sector of sectors) {
     let dotCount = 0;
     for (const cell of sector.floorCells) {
       const key = keyOf(cell.x, cell.y);
-      if (pelletKeys.has(key) || spawnProtected.has(key) || switchCells.has(key) || gateCells.has(key)) {
+      if (pelletKeys.has(key) || spawnProtected.has(key) || gateSwitchCells.has(key)) {
         continue;
       }
       dots.add(key);
@@ -193,7 +186,7 @@ export function generateWorld(playerCount: number, seed = Date.now()): Generated
     sector.totalDots = dotCount;
     sector.respawnCandidates = sector.floorCells.filter((cell) => {
       const key = keyOf(cell.x, cell.y);
-      return !pelletKeys.has(key) && !spawnProtected.has(key) && !switchCells.has(key) && !gateCells.has(key);
+      return !pelletKeys.has(key) && !spawnProtected.has(key) && !gateSwitchCells.has(key);
     });
   }
 

@@ -4,15 +4,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
-    "dev:server": "tsx watch src/server/index.ts",
+    "dev": "npm run dev:client",
     "dev:client": "vite",
-    "build": "npm run build:client && npm run build:server",
+    "build": "npm run build:client",
     "build:client": "vite build",
-    "build:server": "tsc -p tsconfig.server.json",
-    "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit",
-    "simulate": "tsx src/server/simulate.ts",
-    "start": "node dist/server/server/index.js"
+    "check": "npm run generate:game-rules:check && tsc -p tsconfig.client.json --noEmit",
+    "test": "npm run generate:game-rules:check && npm run test:generator",
+    "test:generator": "node scripts/generate-game-rules.selftest.mjs",
+    "generate:game-rules": "node scripts/generate-game-rules.mjs",
+    "generate:game-rules:check": "node scripts/generate-game-rules.mjs --check",
+    "simulate": "npm run simulate:rust --",
+    "simulate:rust": "cargo run --manifest-path rust/server/Cargo.toml --bin simulate --",
+    "reference:ts:simulate": "tsx reference/ts-server/src/server/simulate.ts",
+    "start": "echo \"Rust WebSocket server is not implemented yet. Use simulator commands for now.\" && exit 1"
   },
   "dependencies": {
     "express": "^5.1.0",
@@ -25,6 +29,6 @@
     "concurrently": "^9.2.1",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
-    "vite": "^7.1.3"
+    "vite": "^7.3.1"
   }
 }
