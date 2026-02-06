@@ -18,10 +18,20 @@ const hud = mustElement<HTMLElement>('hud');
 const lobby = mustElement<HTMLElement>('lobby');
 const result = mustElement<HTMLElement>('result');
 const touchControls = mustElement<HTMLElement>('touch-controls');
+const topStatus = mustElement<HTMLElement>('top-status');
+const spectatorControls = mustElement<HTMLElement>('spectator-controls');
 const ctx = mustCanvasContext(canvas);
 
 const dotSet = new Set<string>();
 const pelletMap = new Map<string, { x: number; y: number; active: boolean }>();
+
+interface InterpolationState {
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  updatedAtMs: number;
+}
 
 let ws: WebSocket | null = null;
 let reconnectTimer: number | null = null;
@@ -43,6 +53,9 @@ let lobbyMessage = '';
 let logs: string[] = [];
 let currentDir: 'up' | 'down' | 'left' | 'right' | 'none' = 'none';
 let followPlayerId: string | null = null;
+let latestSnapshotReceivedAtMs = performance.now();
+const playerInterpolation = new Map<string, InterpolationState>();
+const ghostInterpolation = new Map<string, InterpolationState>();
 
 start();
 
@@ -51,6 +64,7 @@ function start(): void {
   connect();
   wireKeyboard();
   wireTouchControls();
+  initSpectatorControls();
   window.addEventListener('resize', resize);
   requestAnimationFrame(renderFrame);
 }
@@ -118,6 +132,7 @@ function handleServerMessage(message: ServerMessage): void {
     isSpectator = message.isSpectator;
     localStorage.setItem('mmo-packman-token', reconnectToken);
     updateTouchControlsVisibility();
+    updateStatusPanels();
     return;
   }
 
@@ -125,6 +140,7 @@ function handleServerMessage(message: ServerMessage): void {
     isHost = message.hostId === sessionId;
     lobbyMessage = message.note ?? '';
     renderLobby(message.players, message.running, message.canStart, message.spectatorCount);
+    updateStatusPanels();
     return;
   }
 
@@ -136,6 +152,9 @@ function handleServerMessage(message: ServerMessage): void {
     summary = null;
     logs = [];
     followPlayerId = null;
+    playerInterpolation.clear();
+    ghostInterpolation.clear();
+    latestSnapshotReceivedAtMs = performance.now();
     dotSet.clear();
     pelletMap.clear();
 
@@ -149,21 +168,25 @@ function handleServerMessage(message: ServerMessage): void {
     lobby.classList.add('hidden');
     result.classList.add('hidden');
     updateTouchControlsVisibility();
+    updateStatusPanels();
     return;
   }
 
   if (message.type === 'state') {
     snapshot = message.snapshot;
+    updateInterpolationStates(message.snapshot);
     for (const event of message.snapshot.events) {
       applyEvent(event);
     }
     updateHud();
+    updateStatusPanels();
     return;
   }
 
   if (message.type === 'game_over') {
     summary = message.summary;
     showResult();
+    updateStatusPanels();
     return;
   }
 
@@ -368,15 +391,20 @@ function wireKeyboard(): void {
   };
 
   window.addEventListener('keydown', (event) => {
+    const rawKey = event.key;
+    const key = rawKey.length === 1 ? rawKey.toLowerCase() : rawKey;
+
     if (isSpectator) {
-      if (event.key === 'Tab') {
+      if (rawKey === 'Tab' || rawKey === ']' || key === 'e') {
         event.preventDefault();
-        cycleSpectatorTarget();
+        cycleSpectatorTarget(1);
+      } else if (rawKey === '[' || key === 'q') {
+        event.preventDefault();
+        cycleSpectatorTarget(-1);
       }
       return;
     }
 
-    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
     const dir = dirMap[key];
     if (dir && dir !== currentDir) {
       currentDir = dir;
@@ -436,24 +464,95 @@ function updateTouchControlsVisibility(): void {
   }
 }
 
-function cycleSpectatorTarget(): void {
+function cycleSpectatorTarget(delta = 1): void {
   if (!snapshot) {
     return;
   }
 
-  const alive = snapshot.players.filter((player) => player.state !== 'down');
-  if (alive.length === 0) {
+  const players = snapshot.players;
+  if (players.length === 0) {
     return;
   }
 
   if (!followPlayerId) {
-    followPlayerId = alive[0]?.id ?? null;
+    const best = [...players].sort((a, b) => b.score - a.score)[0];
+    followPlayerId = best?.id ?? null;
+    updateStatusPanels();
     return;
   }
 
-  const idx = alive.findIndex((player) => player.id === followPlayerId);
-  const next = alive[(idx + 1) % alive.length];
+  const idx = players.findIndex((player) => player.id === followPlayerId);
+  const normalized = idx < 0 ? 0 : idx;
+  const nextIndex = (normalized + delta + players.length) % players.length;
+  const next = players[nextIndex];
   followPlayerId = next?.id ?? followPlayerId;
+  updateStatusPanels();
+}
+
+function initSpectatorControls(): void {
+  spectatorControls.innerHTML = `
+    <div class="spec-title">観戦ターゲット</div>
+    <div class="spec-row">
+      <button id="spectator-prev" type="button">◀</button>
+      <span id="spectator-target">auto</span>
+      <button id="spectator-next" type="button">▶</button>
+    </div>
+    <div class="hint">Tab / ] / E: 次, [ / Q: 前</div>
+  `;
+
+  const prev = document.getElementById('spectator-prev');
+  const next = document.getElementById('spectator-next');
+  prev?.addEventListener('click', () => cycleSpectatorTarget(-1));
+  next?.addEventListener('click', () => cycleSpectatorTarget(1));
+}
+
+function updateStatusPanels(): void {
+  if (!lobby.classList.contains('hidden')) {
+    topStatus.classList.add('hidden');
+    spectatorControls.classList.add('hidden');
+    return;
+  }
+  updateTopStatus();
+  updateSpectatorControls();
+}
+
+function updateTopStatus(): void {
+  if (!snapshot) {
+    topStatus.classList.add('hidden');
+    return;
+  }
+
+  const focus = isSpectator
+    ? resolveFocusPlayer(snapshot)
+    : snapshot.players.find((player) => player.id === meId) ?? null;
+  if (!focus) {
+    topStatus.classList.add('hidden');
+    return;
+  }
+
+  const ratio = focus.gaugeMax > 0 ? (focus.gauge / focus.gaugeMax) * 100 : 0;
+  const title = isSpectator ? `観戦: ${escapeHtml(focus.name)}` : `覚醒: ${escapeHtml(focus.name)}`;
+  topStatus.innerHTML = `
+    <div class="status-title">${title}</div>
+    <div class="stock-line">Stock ${'★'.repeat(focus.stocks)}${'☆'.repeat(Math.max(0, 3 - focus.stocks))}</div>
+    <div class="gauge-wrap"><div class="gauge-fill" style="width:${ratio.toFixed(1)}%"></div></div>
+    <div class="gauge-text">${focus.gauge}/${focus.gaugeMax}</div>
+  `;
+  topStatus.classList.remove('hidden');
+}
+
+function updateSpectatorControls(): void {
+  if (!isSpectator || !snapshot) {
+    spectatorControls.classList.add('hidden');
+    return;
+  }
+
+  resolveFocusPlayer(snapshot);
+  spectatorControls.classList.remove('hidden');
+  const targetText = document.getElementById('spectator-target');
+  if (targetText) {
+    targetText.textContent = currentFollowName(snapshot.players);
+  }
 }
 
 function updateHud(): void {
@@ -471,9 +570,7 @@ function updateHud(): void {
   const meLine = isSpectator
     ? `<p>mode: ${modeText} | follow: ${escapeHtml(currentFollowName(snapshot.players))}</p>`
     : me
-      ? `<p>自分: ${escapeHtml(me.name)} | score ${me.score}</p>
-         <p>状態: ${me.state} | 覚醒 ${'★'.repeat(me.stocks)}${'☆'.repeat(Math.max(0, 3 - me.stocks))}</p>
-         <p>ゲージ: ${me.gauge}/${me.gaugeMax}</p>`
+      ? `<p>mode: ${modeText}</p><p>自分: ${escapeHtml(me.name)} | score ${me.score} | 状態: ${me.state}</p>`
       : '<p>自分の情報なし</p>';
 
   hud.innerHTML = `
@@ -516,6 +613,7 @@ function draw(): void {
   const camera = resolveCameraCenter(world, snapshot);
   const centerX = camera.x;
   const centerY = camera.y;
+  const interpolationAlpha = getInterpolationAlpha();
 
   const tileSize = Math.max(12, Math.min(30, Math.floor(Math.min(canvas.width, canvas.height) / 26)));
   const originX = Math.floor(canvas.width / 2 - centerX * tileSize);
@@ -564,6 +662,10 @@ function draw(): void {
     if (x < minX || x > maxX || y < minY || y > maxY) {
       continue;
     }
+    const row = world.tiles[y] as string | undefined;
+    if (!row || row[x] !== '.') {
+      continue;
+    }
     const sector = sectorAt(world, snapshot, x, y);
     if (!sector?.discovered) {
       continue;
@@ -580,6 +682,10 @@ function draw(): void {
     if (pellet.x < minX || pellet.x > maxX || pellet.y < minY || pellet.y > maxY) {
       continue;
     }
+    const row = world.tiles[pellet.y] as string | undefined;
+    if (!row || row[pellet.x] !== '.') {
+      continue;
+    }
     const sector = sectorAt(world, snapshot, pellet.x, pellet.y);
     if (!sector?.discovered) {
       continue;
@@ -591,34 +697,57 @@ function draw(): void {
 
   drawGates(world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY);
   drawFruits(snapshot.fruits, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY);
-  drawGhosts(snapshot.ghosts, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY);
-  drawPlayers(snapshot.players, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY);
+  drawGhosts(snapshot.ghosts, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY, interpolationAlpha);
+  drawPlayers(
+    snapshot.players,
+    world,
+    snapshot,
+    originX,
+    originY,
+    tileSize,
+    minX,
+    minY,
+    maxX,
+    maxY,
+    snapshot.nowMs,
+    interpolationAlpha,
+  );
 }
 
 function resolveCameraCenter(worldState: WorldInit, state: Snapshot): { x: number; y: number } {
-  if (!isSpectator) {
-    const me = state.players.find((player) => player.id === meId);
-    if (me) {
-      return { x: me.x + 0.5, y: me.y + 0.5 };
-    }
-  }
-
-  const alivePlayers = state.players.filter((player) => player.state !== 'down');
-  if (alivePlayers.length === 0) {
+  const focus = resolveFocusPlayer(state);
+  if (!focus) {
     return { x: worldState.width / 2, y: worldState.height / 2 };
   }
 
-  let follow = followPlayerId ? alivePlayers.find((player) => player.id === followPlayerId) : undefined;
+  const sector = sectorAt(worldState, state, focus.x, focus.y);
+  if (!sector) {
+    return { x: focus.x + 0.5, y: focus.y + 0.5 };
+  }
+
+  return {
+    x: sector.x + sector.size / 2,
+    y: sector.y + sector.size / 2,
+  };
+}
+
+function resolveFocusPlayer(state: Snapshot): PlayerView | null {
+  if (!isSpectator) {
+    return state.players.find((player) => player.id === meId) ?? null;
+  }
+
+  const members = state.players;
+  if (members.length === 0) {
+    return null;
+  }
+
+  let follow = followPlayerId ? members.find((player) => player.id === followPlayerId) : undefined;
   if (!follow) {
-    follow = [...alivePlayers].sort((a, b) => b.score - a.score)[0];
+    follow = [...members].sort((a, b) => b.score - a.score)[0];
     followPlayerId = follow?.id ?? null;
   }
 
-  if (!follow) {
-    return { x: worldState.width / 2, y: worldState.height / 2 };
-  }
-
-  return { x: follow.x + 0.5, y: follow.y + 0.5 };
+  return follow ?? null;
 }
 
 function drawGates(
@@ -696,18 +825,20 @@ function drawGhosts(
   minY: number,
   maxX: number,
   maxY: number,
+  interpolationAlpha: number,
 ): void {
   for (const ghost of ghosts) {
-    if (ghost.x < minX || ghost.x > maxX || ghost.y < minY || ghost.y > maxY) {
+    const renderPos = getInterpolatedPosition(ghost.id, ghost.x, ghost.y, ghostInterpolation, interpolationAlpha);
+    if (renderPos.x < minX || renderPos.x > maxX || renderPos.y < minY || renderPos.y > maxY) {
       continue;
     }
-    const sector = sectorAt(worldState, state, ghost.x, ghost.y);
+    const sector = sectorAt(worldState, state, Math.floor(renderPos.x), Math.floor(renderPos.y));
     if (!sector?.discovered) {
       continue;
     }
 
-    const sx = originX + ghost.x * tileSize + tileSize / 2;
-    const sy = originY + ghost.y * tileSize + tileSize / 2;
+    const sx = originX + renderPos.x * tileSize + tileSize / 2;
+    const sy = originY + renderPos.y * tileSize + tileSize / 2;
     circle(sx, sy, Math.max(4, tileSize * 0.34), ghostColor(ghost.type));
 
     if (ghost.type === 'boss') {
@@ -729,30 +860,146 @@ function drawPlayers(
   minY: number,
   maxX: number,
   maxY: number,
+  nowMs: number,
+  interpolationAlpha: number,
 ): void {
   for (const player of players) {
-    if (player.x < minX || player.x > maxX || player.y < minY || player.y > maxY) {
+    const renderPos = getInterpolatedPosition(player.id, player.x, player.y, playerInterpolation, interpolationAlpha);
+    if (renderPos.x < minX || renderPos.x > maxX || renderPos.y < minY || renderPos.y > maxY) {
       continue;
     }
-    const sector = sectorAt(worldState, state, player.x, player.y);
+    const sector = sectorAt(worldState, state, Math.floor(renderPos.x), Math.floor(renderPos.y));
     if (!sector?.discovered) {
       continue;
     }
 
-    const sx = originX + player.x * tileSize + tileSize / 2;
-    const sy = originY + player.y * tileSize + tileSize / 2;
+    const sx = originX + renderPos.x * tileSize + tileSize / 2;
+    const sy = originY + renderPos.y * tileSize + tileSize / 2;
     const base = player.id === meId ? '#ffef8f' : '#f5b264';
     const color = player.state === 'down' ? 'rgba(189, 68, 68, 0.55)' : base;
     circle(sx, sy, Math.max(4, tileSize * 0.36), color);
 
     if (player.state === 'power') {
-      circle(sx, sy, Math.max(6, tileSize * 0.48), 'rgba(88, 213, 255, 0.25)', false);
+      drawPowerEffect(sx, sy, tileSize, nowMs, player.id === meId);
     }
 
     ctx.fillStyle = '#f7f9ff';
     ctx.font = `${Math.max(9, Math.floor(tileSize * 0.36))}px monospace`;
     ctx.fillText(player.name.slice(0, 7), sx - tileSize * 0.45, sy - tileSize * 0.45);
   }
+}
+
+function drawPowerEffect(x: number, y: number, tileSize: number, nowMs: number, isMe: boolean): void {
+  const base = tileSize * 0.52;
+  const phase = (nowMs % 1200) / 1200;
+
+  for (let ring = 0; ring < 3; ring += 1) {
+    const p = (phase + ring * 0.22) % 1;
+    const radius = base + tileSize * (0.18 + p * 0.75);
+    const alpha = (1 - p) * (isMe ? 0.52 : 0.42);
+    circle(x, y, radius, `rgba(95, 238, 255, ${alpha.toFixed(3)})`, false);
+  }
+
+  circle(x, y, base * 1.18, `rgba(82, 175, 255, ${isMe ? '0.26' : '0.18'})`);
+
+  const sparks = 8;
+  for (let i = 0; i < sparks; i += 1) {
+    const angle = ((Math.PI * 2) / sparks) * i + phase * Math.PI * 2;
+    const rr = base * (1.2 + ((i % 2 === 0 ? phase : 1 - phase) * 0.7));
+    const sx = x + Math.cos(angle) * rr;
+    const sy = y + Math.sin(angle) * rr;
+    circle(sx, sy, Math.max(1.8, tileSize * 0.07), 'rgba(165, 249, 255, 0.88)');
+  }
+}
+
+function updateInterpolationStates(nextSnapshot: Snapshot): void {
+  const nowMs = performance.now();
+  latestSnapshotReceivedAtMs = nowMs;
+
+  updateEntityInterpolationMap(
+    playerInterpolation,
+    nextSnapshot.players.map((player) => ({ id: player.id, x: player.x, y: player.y })),
+    nowMs,
+    3,
+  );
+  updateEntityInterpolationMap(
+    ghostInterpolation,
+    nextSnapshot.ghosts.map((ghost) => ({ id: ghost.id, x: ghost.x, y: ghost.y })),
+    nowMs,
+    4,
+  );
+}
+
+function updateEntityInterpolationMap(
+  map: Map<string, InterpolationState>,
+  entities: Array<{ id: string; x: number; y: number }>,
+  nowMs: number,
+  teleportThreshold: number,
+): void {
+  const aliveIds = new Set<string>();
+
+  for (const entity of entities) {
+    aliveIds.add(entity.id);
+
+    const previous = map.get(entity.id);
+    if (!previous) {
+      map.set(entity.id, {
+        fromX: entity.x,
+        fromY: entity.y,
+        toX: entity.x,
+        toY: entity.y,
+        updatedAtMs: nowMs,
+      });
+      continue;
+    }
+
+    let fromX = previous.toX;
+    let fromY = previous.toY;
+    const jumpDistance = Math.abs(fromX - entity.x) + Math.abs(fromY - entity.y);
+    if (jumpDistance > teleportThreshold) {
+      fromX = entity.x;
+      fromY = entity.y;
+    }
+
+    map.set(entity.id, {
+      fromX,
+      fromY,
+      toX: entity.x,
+      toY: entity.y,
+      updatedAtMs: nowMs,
+    });
+  }
+
+  for (const existingId of map.keys()) {
+    if (!aliveIds.has(existingId)) {
+      map.delete(existingId);
+    }
+  }
+}
+
+function getInterpolationAlpha(): number {
+  const tickRate = config?.tickRate ?? 20;
+  const frameMs = 1000 / Math.max(1, tickRate);
+  const elapsedMs = performance.now() - latestSnapshotReceivedAtMs;
+  return clampNumber(elapsedMs / frameMs, 0, 1);
+}
+
+function getInterpolatedPosition(
+  entityId: string,
+  currentX: number,
+  currentY: number,
+  map: Map<string, InterpolationState>,
+  alpha: number,
+): { x: number; y: number } {
+  const item = map.get(entityId);
+  if (!item) {
+    return { x: currentX, y: currentY };
+  }
+
+  return {
+    x: item.fromX + (item.toX - item.fromX) * alpha,
+    y: item.fromY + (item.toY - item.fromY) * alpha,
+  };
 }
 
 function sectorAt(worldState: WorldInit, state: Snapshot, x: number, y: number) {
@@ -909,5 +1156,9 @@ function normalizeNumber(input: string | null, fallback: number, min: number, ma
   if (!Number.isFinite(n)) {
     return fallback;
   }
-  return Math.max(min, Math.min(max, Math.floor(n)));
+  return clampNumber(Math.floor(n), min, max);
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }

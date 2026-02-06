@@ -365,6 +365,10 @@ export class GameEngine {
         continue;
       }
       if (nowMs >= pellet.respawnAt) {
+        if (!this.isWalkable(pellet.x, pellet.y) || this.isGateCellOrSwitch(pellet.x, pellet.y)) {
+          pellet.respawnAt = nowMs + 1000;
+          continue;
+        }
         pellet.active = true;
         this.events.push({ type: 'pellet_respawned', key: pellet.key });
       }
@@ -1452,8 +1456,7 @@ export class GameEngine {
     for (let i = 0; i < 30; i += 1) {
       const cell = this.rng.pick(sector.respawnCandidates);
       const key = keyOf(cell.x, cell.y);
-      const pellet = this.world.powerPellets.get(key);
-      if (this.world.dots.has(key) || pellet?.active) {
+      if (!this.isValidDotRespawnCell(sector.id, cell.x, cell.y)) {
         continue;
       }
       this.world.dots.add(key);
@@ -1462,6 +1465,52 @@ export class GameEngine {
       return true;
     }
 
+    for (const cell of sector.respawnCandidates) {
+      if (!this.isValidDotRespawnCell(sector.id, cell.x, cell.y)) {
+        continue;
+      }
+      this.world.dots.add(keyOf(cell.x, cell.y));
+      sector.dotCount += 1;
+      this.events.push({ type: 'dot_respawned', x: cell.x, y: cell.y });
+      return true;
+    }
+
+    return false;
+  }
+
+  private isValidDotRespawnCell(sectorId: number, x: number, y: number): boolean {
+    if (!this.isWalkable(x, y)) {
+      return false;
+    }
+    if (this.getSectorId(x, y) !== sectorId) {
+      return false;
+    }
+
+    const key = keyOf(x, y);
+    if (this.world.dots.has(key)) {
+      return false;
+    }
+    if (this.world.powerPellets.has(key)) {
+      return false;
+    }
+    if (this.isGateCellOrSwitch(x, y)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  private isGateCellOrSwitch(x: number, y: number): boolean {
+    for (const gate of this.world.gates) {
+      if (
+        (gate.a.x === x && gate.a.y === y) ||
+        (gate.b.x === x && gate.b.y === y) ||
+        (gate.switchA.x === x && gate.switchA.y === y) ||
+        (gate.switchB.x === x && gate.switchB.y === y)
+      ) {
+        return true;
+      }
+    }
     return false;
   }
 
