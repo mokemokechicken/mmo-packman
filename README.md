@@ -6,21 +6,25 @@
 
 ```bash
 npm install
+# terminal 1
 npm run start
+# terminal 2
 npm run dev
 ```
 
-- Rust runtime start: `npm run start`
+- Rust server start: `npm run start`
 - Client preview: `http://localhost:5173`
+- Rust WebSocket server: `ws://localhost:8080/ws` (`http://localhost:8080/healthz`)
 - Rust simulator: `npm run simulate -- --single --ai 5 --minutes 3 --difficulty normal`
 
-> 現在、TypeScript サーバーは開発停止し、参照実装として `reference/ts-server/src/server/` に退避しています。  
-> Rust WebSocket サーバー本体は未実装（Issue [#27](https://github.com/mokemokechicken/mmo-packman/issues/27)）。
+> TypeScript サーバーは開発停止し、参照実装として `reference/ts-server/src/server/` に退避しています。  
+> 実運用向けサーバーは Rust 実装を使用してください。
 
 ## スクリプト
 
 - `npm run dev` クライアント開発サーバー起動（Vite）
-- `npm run start` Rust実装ランタイム起動（既定シナリオ）
+- `npm run start` Rust WebSocket サーバー起動
+- `npm run start:rust-server` Rust WebSocket サーバー起動
 - `npm run check` 型チェック
 - `npm run build` 本番ビルド
 - `npm run test` Node 側の自己テスト

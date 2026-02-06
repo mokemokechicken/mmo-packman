@@ -23,8 +23,8 @@
     "simulate": "npm run simulate:rust --",
     "simulate:rust": "cargo run --manifest-path rust/server/Cargo.toml --bin simulate --",
     "reference:ts:simulate": "tsx reference/ts-server/src/server/simulate.ts",
-    "start": "npm run start:rust",
-    "start:rust": "npm run simulate:rust -- --single --ai 5 --minutes 3 --difficulty normal --seed 12345"
+    "start": "npm run start:rust-server",
+    "start:rust-server": "cargo run --manifest-path rust/server/Cargo.toml --bin server"
   },
   "dependencies": {
     "express": "^5.1.0",

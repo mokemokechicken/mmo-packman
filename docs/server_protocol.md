@@ -105,3 +105,7 @@
 - `winners`: 同率を含む受賞者一覧
 - `awards` は常に配列として送信される（該当なしの場合は `[]`）
 - すべて 0 件のカテゴリは送信対象外（`awards` から除外）
+
+## 互換テスト
+
+- Rust 側の最小プロトコル互換テストは `rust/server/src/bin/server.rs` の unit test で実施する。

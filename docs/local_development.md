@@ -19,7 +19,16 @@ npm run dev
 ```
 
 - クライアント(Vite): `http://localhost:5173`
-- 現在このコマンドでサーバーは起動しない（TSサーバーは退避済み）。
+- このコマンドではサーバーは起動しない。別途 `npm run start:rust-server` を起動する。
+
+## Rust WebSocket サーバー起動
+
+```bash
+npm run start:rust-server
+```
+
+- WebSocket endpoint: `ws://localhost:8080/ws`
+- health check: `http://localhost:8080/healthz`
 
 ## ビルド
 
@@ -87,5 +96,4 @@ npm run reference:ts:simulate -- --single --ai 5 --minutes 3 --difficulty normal
 
 ## 注意
 
-- Rust WebSocket サーバーは未実装のため、UI からの実プレイは現時点では未対応。
-- 追跡Issue: [#27](https://github.com/mokemokechicken/mmo-packman/issues/27)
+- クライアントとサーバーを同時起動する場合は別ターミナルで起動する。

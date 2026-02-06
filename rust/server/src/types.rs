@@ -10,6 +10,18 @@ pub enum Direction {
     None,
 }
 
+impl Direction {
+    pub fn parse_move(value: &str) -> Option<Self> {
+        match value {
+            "up" => Some(Self::Up),
+            "down" => Some(Self::Down),
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlayerState {
