@@ -332,7 +332,6 @@ impl GameEngine {
 
     fn update_players(&mut self, dt_ms: u64, now_ms: u64) {
         let dt_sec = dt_ms as f32 / 1000.0;
-        let capture_ratio = self.capture_ratio();
 
         for idx in 0..self.players.len() {
             if self.players[idx].view.state == PlayerState::Down {
@@ -371,13 +370,7 @@ impl GameEngine {
                 continue;
             }
 
-            let mut speed = PLAYER_BASE_SPEED;
-            if capture_ratio >= 0.7 {
-                speed *= PLAYER_CAPTURED_SPEED_MULTIPLIER;
-            }
-            if self.players[idx].view.state == PlayerState::Power {
-                speed *= 1.08;
-            }
+            let speed = self.get_player_speed(idx, now_ms);
 
             self.players[idx].move_buffer += speed * dt_sec;
             let mut safety = 0;
@@ -421,6 +414,30 @@ impl GameEngine {
         }
 
         self.players[player_idx].desired_dir = self.choose_dot_direction(player.x, player.y);
+    }
+
+    fn get_player_speed(&self, idx: usize, now_ms: u64) -> f32 {
+        let mut speed = PLAYER_BASE_SPEED;
+        let Some(player) = self.players.get(idx) else {
+            return speed;
+        };
+
+        if let Some(sector_id) = self.get_sector_id(player.view.x, player.view.y) {
+            if self
+                .world
+                .sectors
+                .get(sector_id)
+                .map(|sector| sector.view.captured)
+                .unwrap_or(false)
+            {
+                speed *= PLAYER_CAPTURED_SPEED_MULTIPLIER;
+            }
+        }
+
+        if now_ms < player.view.speed_buff_until {
+            speed *= 1.3;
+        }
+        speed
     }
 
     fn update_ghosts(&mut self, dt_ms: u64, now_ms: u64) {
@@ -896,11 +913,14 @@ impl GameEngine {
         if self.world.dots.remove(&(x, y)) {
             self.players[idx].view.score += 10;
             self.players[idx].stats.dots += 1;
-            self.players[idx].view.gauge += 1;
-            if self.players[idx].view.gauge >= DOTS_FOR_AWAKEN {
-                self.players[idx].view.gauge -= DOTS_FOR_AWAKEN;
-                self.players[idx].view.stocks =
-                    (self.players[idx].view.stocks + 1).min(MAX_AWAKEN_STOCK);
+            if self.players[idx].view.stocks < MAX_AWAKEN_STOCK {
+                self.players[idx].view.gauge += 1;
+                if self.players[idx].view.gauge >= DOTS_FOR_AWAKEN {
+                    self.players[idx].view.stocks += 1;
+                    self.players[idx].view.gauge = 0;
+                }
+            } else {
+                self.players[idx].view.gauge = DOTS_FOR_AWAKEN;
             }
 
             if let Some(sector_id) = self.get_sector_id(x, y) {
@@ -1113,6 +1133,17 @@ impl GameEngine {
                 player.stats.captures += 1;
             }
         }
+
+        let ghosts_in_sector: Vec<usize> = self
+            .ghosts
+            .iter()
+            .enumerate()
+            .filter(|(_, ghost)| self.get_sector_id(ghost.view.x, ghost.view.y) == Some(sector_id))
+            .map(|(idx, _)| idx)
+            .collect();
+        for ghost_idx in ghosts_in_sector {
+            self.respawn_ghost(ghost_idx);
+        }
     }
 
     fn count_ghost_by_sector_and_type(&self, sector_id: usize, ghost_type: GhostType) -> usize {
@@ -1133,26 +1164,9 @@ impl GameEngine {
     }
 
     fn spawn_ghost(&mut self, _now_ms: u64, capture_ratio: f32) {
-        if self.world.ghost_spawn_cells.is_empty() {
+        let Some(spawn) = self.pick_ghost_spawn_position(None) else {
             return;
-        }
-        let candidate_spawns: Vec<Vec2> = self
-            .world
-            .ghost_spawn_cells
-            .iter()
-            .cloned()
-            .filter(|spawn| {
-                self.players
-                    .iter()
-                    .all(|player| manhattan(spawn.x, spawn.y, player.view.x, player.view.y) >= 5)
-            })
-            .collect();
-        let spawn_source = if candidate_spawns.is_empty() {
-            self.world.ghost_spawn_cells.clone()
-        } else {
-            candidate_spawns
         };
-        let spawn = spawn_source[self.rng.pick_index(spawn_source.len())];
         let ghost_type = pick_ghost_type(capture_ratio, &mut self.rng);
         let id = self.make_id("ghost");
         let hp = if ghost_type == GhostType::Boss { 3 } else { 1 };
@@ -1175,11 +1189,15 @@ impl GameEngine {
     }
 
     fn respawn_ghost(&mut self, ghost_idx: usize) {
-        if ghost_idx >= self.ghosts.len() || self.world.ghost_spawn_cells.is_empty() {
+        if ghost_idx >= self.ghosts.len() {
             return;
         }
-        let spawn =
-            self.world.ghost_spawn_cells[self.rng.pick_index(self.world.ghost_spawn_cells.len())];
+        let spawn = self
+            .pick_ghost_spawn_position(Some(ghost_idx))
+            .unwrap_or(Vec2 {
+                x: self.ghosts[ghost_idx].view.x,
+                y: self.ghosts[ghost_idx].view.y,
+            });
         let capture_ratio = self.capture_ratio();
         let ghost_type = pick_ghost_type(capture_ratio, &mut self.rng);
         self.ghosts[ghost_idx].view.x = spawn.x;
@@ -1188,6 +1206,76 @@ impl GameEngine {
         self.ghosts[ghost_idx].view.dir = random_direction(&mut self.rng);
         self.ghosts[ghost_idx].view.hp = if ghost_type == GhostType::Boss { 3 } else { 1 };
         self.ghosts[ghost_idx].view.stunned_until = 0;
+    }
+
+    fn is_cell_occupied_by_other_ghost(
+        &self,
+        x: i32,
+        y: i32,
+        exclude_ghost_idx: Option<usize>,
+    ) -> bool {
+        self.ghosts.iter().enumerate().any(|(idx, ghost)| {
+            Some(idx) != exclude_ghost_idx && ghost.view.x == x && ghost.view.y == y
+        })
+    }
+
+    fn pick_ghost_spawn_position(&mut self, exclude_ghost_idx: Option<usize>) -> Option<Vec2> {
+        if self.world.ghost_spawn_cells.is_empty() {
+            return None;
+        }
+        let mut spawn_sources: Vec<Vec2> = self
+            .world
+            .ghost_spawn_cells
+            .iter()
+            .cloned()
+            .filter(|spawn| {
+                !self.is_cell_occupied_by_other_ghost(spawn.x, spawn.y, exclude_ghost_idx)
+                    && self.players.iter().all(|player| {
+                        player.view.state == PlayerState::Down
+                            || manhattan(spawn.x, spawn.y, player.view.x, player.view.y) >= 5
+                    })
+            })
+            .collect();
+        if spawn_sources.is_empty() {
+            spawn_sources = self.world.ghost_spawn_cells.clone();
+        }
+        if spawn_sources.is_empty() {
+            return None;
+        }
+
+        for _ in 0..24 {
+            let anchor = spawn_sources[self.rng.pick_index(spawn_sources.len())];
+            let dx = self.rng.int(-2, 2);
+            let dy = self.rng.int(-2, 2);
+            let tx = (anchor.x + dx).clamp(1, self.world.width - 2);
+            let ty = (anchor.y + dy).clamp(1, self.world.height - 2);
+            if !is_walkable(&self.world, tx, ty) {
+                continue;
+            }
+            if self.is_cell_occupied_by_other_ghost(tx, ty, exclude_ghost_idx) {
+                continue;
+            }
+            let near_player = self.players.iter().any(|player| {
+                player.view.state != PlayerState::Down
+                    && manhattan(tx, ty, player.view.x, player.view.y) < 3
+            });
+            if near_player {
+                continue;
+            }
+            return Some(Vec2 { x: tx, y: ty });
+        }
+
+        for anchor in spawn_sources {
+            if !is_walkable(&self.world, anchor.x, anchor.y) {
+                continue;
+            }
+            if self.is_cell_occupied_by_other_ghost(anchor.x, anchor.y, exclude_ghost_idx) {
+                continue;
+            }
+            return Some(anchor);
+        }
+
+        None
     }
 
     fn down_player(&mut self, player_idx: usize, now_ms: u64) {
@@ -1397,7 +1485,10 @@ fn pick_ghost_type(capture_ratio: f32, rng: &mut Rng) -> GhostType {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::constants::TICK_MS;
+    use crate::constants::{
+        DOTS_FOR_AWAKEN, MAX_AWAKEN_STOCK, PLAYER_BASE_SPEED, PLAYER_CAPTURED_SPEED_MULTIPLIER,
+        TICK_MS,
+    };
     use crate::engine::{GameEngine, GameEngineOptions};
     use crate::rng::Rng;
     use crate::types::{
@@ -1429,6 +1520,10 @@ mod tests {
             .tiles
             .get_mut(y as usize)
             .expect("row in bounds") = String::from_utf8(bytes).expect("valid utf8 row");
+    }
+
+    fn approx_eq(a: f32, b: f32, eps: f32) -> bool {
+        (a - b).abs() <= eps
     }
 
     #[test]
@@ -1659,6 +1754,103 @@ mod tests {
             engine.step(TICK_MS);
         }
         assert!(engine.ghosts.len() > before);
+    }
+
+    #[test]
+    fn player_speed_depends_on_captured_sector_not_global_ratio() {
+        let mut engine = GameEngine::new(
+            make_players(1),
+            Difficulty::Normal,
+            889,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        let now_ms = engine.started_at_ms + 5_000;
+        let player = &engine.players[0].view;
+        let sector_id = engine
+            .get_sector_id(player.x, player.y)
+            .expect("player placed in sector");
+
+        engine.players[0].view.speed_buff_until = 0;
+        engine.world.sectors[sector_id].view.captured = false;
+        let normal_speed = engine.get_player_speed(0, now_ms);
+        assert!(approx_eq(normal_speed, PLAYER_BASE_SPEED, 0.0001));
+
+        engine.world.sectors[sector_id].view.captured = true;
+        let captured_speed = engine.get_player_speed(0, now_ms);
+        assert!(approx_eq(
+            captured_speed,
+            PLAYER_BASE_SPEED * PLAYER_CAPTURED_SPEED_MULTIPLIER,
+            0.0001
+        ));
+
+        engine.players[0].view.speed_buff_until = now_ms + 10_000;
+        let boosted_speed = engine.get_player_speed(0, now_ms);
+        assert!(approx_eq(
+            boosted_speed,
+            PLAYER_BASE_SPEED * PLAYER_CAPTURED_SPEED_MULTIPLIER * 1.3,
+            0.0001
+        ));
+    }
+
+    #[test]
+    fn gauge_stays_full_when_stock_is_maxed() {
+        let mut engine = GameEngine::new(
+            make_players(1),
+            Difficulty::Normal,
+            890,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        let dot = engine
+            .world
+            .dots
+            .iter()
+            .next()
+            .cloned()
+            .expect("world has at least one dot");
+        engine.players[0].view.x = dot.0;
+        engine.players[0].view.y = dot.1;
+        engine.players[0].view.stocks = MAX_AWAKEN_STOCK;
+        engine.players[0].view.gauge = 0;
+
+        engine.apply_player_pickups(0, engine.started_at_ms + 100);
+        assert_eq!(engine.players[0].view.stocks, MAX_AWAKEN_STOCK);
+        assert_eq!(engine.players[0].view.gauge, DOTS_FOR_AWAKEN);
+    }
+
+    #[test]
+    fn capture_sector_respawns_ghosts_inside_it() {
+        let mut engine = GameEngine::new(
+            make_players(2),
+            Difficulty::Normal,
+            891,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        assert!(!engine.ghosts.is_empty());
+
+        let target_sector = engine
+            .get_sector_id(engine.ghosts[0].view.x, engine.ghosts[0].view.y)
+            .expect("ghost in sector");
+        let fallback_spawn = engine
+            .world
+            .sectors
+            .iter()
+            .flat_map(|sector| sector.floor_cells.iter().copied())
+            .find(|cell| engine.get_sector_id(cell.x, cell.y) != Some(target_sector))
+            .expect("find floor cell in different sector");
+        engine.world.ghost_spawn_cells = vec![fallback_spawn];
+
+        engine.capture_sector(target_sector, engine.started_at_ms + 1_000);
+        let still_inside = engine
+            .ghosts
+            .iter()
+            .any(|ghost| engine.get_sector_id(ghost.view.x, ghost.view.y) == Some(target_sector));
+        assert!(!still_inside);
     }
 
     #[test]

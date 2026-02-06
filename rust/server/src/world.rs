@@ -78,13 +78,21 @@ pub fn generate_world(player_count: usize, seed: u32) -> GeneratedWorld {
     let mut gates = Vec::new();
     for row in 0..side {
         for col in 0..side {
-            if col < side - 1 && rng.bool(gate_chance) {
-                let conn = connect_right(&mut grid, row, col, side);
-                gates.push(conn);
+            if col < side - 1 {
+                if rng.bool(gate_chance) {
+                    let conn = connect_right(&mut grid, row, col, side);
+                    gates.push(conn);
+                } else {
+                    open_right_passage(&mut grid, row, col, side);
+                }
             }
-            if row < side - 1 && rng.bool(gate_chance) {
-                let conn = connect_down(&mut grid, row, col, side);
-                gates.push(conn);
+            if row < side - 1 {
+                if rng.bool(gate_chance) {
+                    let conn = connect_down(&mut grid, row, col, side);
+                    gates.push(conn);
+                } else {
+                    open_down_passage(&mut grid, row, col, side);
+                }
             }
         }
     }
@@ -111,7 +119,7 @@ pub fn generate_world(player_count: usize, seed: u32) -> GeneratedWorld {
     }
 
     let player_spawn_cells = collect_player_spawns(&sectors, side);
-    let ghost_spawn_cells = collect_ghost_spawns(&sectors, side);
+    let ghost_spawn_cells = collect_ghost_spawns(&sectors, side, &player_spawn_cells);
 
     let mut spawn_protected = HashSet::new();
     for spawn in &player_spawn_cells {
@@ -330,6 +338,16 @@ fn connect_right(grid: &mut [Vec<char>], row: i32, col: i32, side: i32) -> GateS
     }
 }
 
+fn open_right_passage(grid: &mut [Vec<char>], row: i32, col: i32, side: i32) {
+    let y_center = row * SECTOR_SIZE + SECTOR_SIZE / 2;
+    let x_left = col * SECTOR_SIZE + SECTOR_SIZE - 1;
+    let x_right = (col + 1) * SECTOR_SIZE;
+    grid[y_center as usize][(x_left - 1) as usize] = '.';
+    grid[y_center as usize][x_left as usize] = '.';
+    grid[y_center as usize][x_right as usize] = '.';
+    grid[y_center as usize][(x_right + 1).min(side * SECTOR_SIZE - 1) as usize] = '.';
+}
+
 fn connect_down(grid: &mut [Vec<char>], row: i32, col: i32, side: i32) -> GateState {
     let x_center = col * SECTOR_SIZE + SECTOR_SIZE / 2;
     let y_top = row * SECTOR_SIZE + SECTOR_SIZE - 1;
@@ -370,28 +388,14 @@ fn connect_down(grid: &mut [Vec<char>], row: i32, col: i32, side: i32) -> GateSt
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{generate_world, is_walkable};
-
-    #[test]
-    fn gate_cells_are_walkable_when_generated() {
-        let mut found_gate = false;
-        for seed in 0..200u32 {
-            let world = generate_world(20, seed);
-            if world.gates.is_empty() {
-                continue;
-            }
-            found_gate = true;
-            for gate in &world.gates {
-                assert!(is_walkable(&world, gate.a.x, gate.a.y));
-                assert!(is_walkable(&world, gate.b.x, gate.b.y));
-                assert!(is_walkable(&world, gate.switch_a.x, gate.switch_a.y));
-                assert!(is_walkable(&world, gate.switch_b.x, gate.switch_b.y));
-            }
-        }
-        assert!(found_gate);
-    }
+fn open_down_passage(grid: &mut [Vec<char>], row: i32, col: i32, side: i32) {
+    let x_center = col * SECTOR_SIZE + SECTOR_SIZE / 2;
+    let y_top = row * SECTOR_SIZE + SECTOR_SIZE - 1;
+    let y_bottom = (row + 1) * SECTOR_SIZE;
+    grid[(y_top - 1) as usize][x_center as usize] = '.';
+    grid[y_top as usize][x_center as usize] = '.';
+    grid[y_bottom as usize][x_center as usize] = '.';
+    grid[(y_bottom + 1).min(side * SECTOR_SIZE - 1) as usize][x_center as usize] = '.';
 }
 
 fn scan_sector_floor_cells(grid: &[Vec<char>], sector: &mut SectorInternal) {
@@ -423,35 +427,212 @@ fn place_sector_power_pellets(sector: &SectorInternal, rng: &mut Rng) -> Vec<Vec
 
 fn collect_player_spawns(sectors: &[SectorInternal], side: i32) -> Vec<Vec2> {
     let mut out = Vec::new();
-    for row in 0..side {
-        for col in 0..side {
-            let id = (row * side + col) as usize;
-            if let Some(sector) = sectors.get(id) {
-                out.push(Vec2 {
-                    x: sector.view.x + sector.view.size / 2,
-                    y: sector.view.y + sector.view.size / 2,
-                });
-            }
+    let avoid = HashSet::new();
+    for sector in sectors {
+        let on_edge = sector.view.row == 0
+            || sector.view.col == 0
+            || sector.view.row == side - 1
+            || sector.view.col == side - 1;
+        if !on_edge {
+            continue;
+        }
+        if let Some(spawn) = find_nearest_floor(
+            sector,
+            sector.view.x + sector.view.size / 2,
+            sector.view.y + sector.view.size / 2,
+            &avoid,
+        ) {
+            out.push(spawn);
+        }
+    }
+
+    if out.is_empty() {
+        out.push(Vec2 { x: 1, y: 1 });
+    }
+    dedupe_vec2(out)
+}
+
+fn collect_ghost_spawns(
+    sectors: &[SectorInternal],
+    side: i32,
+    player_spawns: &[Vec2],
+) -> Vec<Vec2> {
+    let mut avoid = HashSet::new();
+    for spawn in player_spawns {
+        avoid.insert((spawn.x, spawn.y));
+    }
+
+    let mut nest_spawns = Vec::new();
+    for sector in sectors {
+        if sector.view.sector_type != SectorType::Nest {
+            continue;
+        }
+        if let Some(spawn) = find_nearest_floor(
+            sector,
+            sector.view.x + sector.view.size / 2,
+            sector.view.y + sector.view.size / 2,
+            &avoid,
+        ) {
+            nest_spawns.push(spawn);
+        }
+    }
+    if !nest_spawns.is_empty() {
+        return dedupe_vec2(nest_spawns);
+    }
+
+    let center_id = ((side * side) / 2) as usize;
+    let center_sector = sectors.get(center_id).or_else(|| sectors.first());
+    if let Some(sector) = center_sector {
+        if let Some(spawn) = find_nearest_floor(
+            sector,
+            sector.view.x + sector.view.size / 2,
+            sector.view.y + sector.view.size / 2,
+            &avoid,
+        ) {
+            return vec![spawn];
+        }
+    }
+
+    for sector in sectors {
+        if let Some(spawn) = find_nearest_floor(
+            sector,
+            sector.view.x + sector.view.size / 2,
+            sector.view.y + sector.view.size / 2,
+            &avoid,
+        ) {
+            return vec![spawn];
+        }
+    }
+
+    let fallback = sectors
+        .first()
+        .and_then(|sector| sector.floor_cells.first().cloned())
+        .unwrap_or(Vec2 {
+            x: SECTOR_SIZE / 2,
+            y: SECTOR_SIZE / 2,
+        });
+    vec![fallback]
+}
+
+fn find_nearest_floor(
+    sector: &SectorInternal,
+    target_x: i32,
+    target_y: i32,
+    avoid: &HashSet<(i32, i32)>,
+) -> Option<Vec2> {
+    let mut best: Option<(i32, i32, i32, Vec2)> = None;
+    for cell in &sector.floor_cells {
+        if avoid.contains(&(cell.x, cell.y)) {
+            continue;
+        }
+        let dist = (cell.x - target_x).abs() + (cell.y - target_y).abs();
+        let key = (dist, cell.y, cell.x, *cell);
+        if best
+            .map(|v| (v.0, v.1, v.2) > (key.0, key.1, key.2))
+            .unwrap_or(true)
+        {
+            best = Some(key);
+        }
+    }
+    best.map(|(_, _, _, cell)| cell)
+}
+
+fn dedupe_vec2(values: Vec<Vec2>) -> Vec<Vec2> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        if seen.insert((value.x, value.y)) {
+            out.push(value);
         }
     }
     out
 }
 
-fn collect_ghost_spawns(sectors: &[SectorInternal], side: i32) -> Vec<Vec2> {
-    let center = side / 2;
-    let mut out = Vec::new();
-    for dr in -1..=1 {
-        for dc in -1..=1 {
-            let row = (center + dr).clamp(0, side - 1);
-            let col = (center + dc).clamp(0, side - 1);
-            let id = (row * side + col) as usize;
-            if let Some(sector) = sectors.get(id) {
-                out.push(Vec2 {
-                    x: sector.view.x + sector.view.size / 2,
-                    y: sector.view.y + sector.view.size / 2,
-                });
+#[cfg(test)]
+mod tests {
+    use crate::constants::SECTOR_SIZE;
+
+    use super::{generate_world, is_walkable};
+
+    #[test]
+    fn gate_cells_are_walkable_when_generated() {
+        let mut found_gate = false;
+        for seed in 0..200u32 {
+            let world = generate_world(20, seed);
+            if world.gates.is_empty() {
+                continue;
+            }
+            found_gate = true;
+            for gate in &world.gates {
+                assert!(is_walkable(&world, gate.a.x, gate.a.y));
+                assert!(is_walkable(&world, gate.b.x, gate.b.y));
+                assert!(is_walkable(&world, gate.switch_a.x, gate.switch_a.y));
+                assert!(is_walkable(&world, gate.switch_b.x, gate.switch_b.y));
+            }
+        }
+        assert!(found_gate);
+    }
+
+    #[test]
+    fn adjacent_sectors_are_connected_even_without_gate() {
+        for seed in 0..100u32 {
+            let world = generate_world(20, seed);
+            for row in 0..world.side {
+                for col in 0..world.side {
+                    if col < world.side - 1 {
+                        let x_left = col * SECTOR_SIZE + SECTOR_SIZE - 1;
+                        let x_right = (col + 1) * SECTOR_SIZE;
+                        let y0 = row * SECTOR_SIZE;
+                        let mut connected = false;
+                        for y in y0..(y0 + SECTOR_SIZE) {
+                            if is_walkable(&world, x_left, y) && is_walkable(&world, x_right, y) {
+                                connected = true;
+                                break;
+                            }
+                        }
+                        assert!(connected);
+                    }
+
+                    if row < world.side - 1 {
+                        let y_top = row * SECTOR_SIZE + SECTOR_SIZE - 1;
+                        let y_bottom = (row + 1) * SECTOR_SIZE;
+                        let x0 = col * SECTOR_SIZE;
+                        let mut connected = false;
+                        for x in x0..(x0 + SECTOR_SIZE) {
+                            if is_walkable(&world, x, y_top) && is_walkable(&world, x, y_bottom) {
+                                connected = true;
+                                break;
+                            }
+                        }
+                        assert!(connected);
+                    }
+                }
             }
         }
     }
-    out
+
+    #[test]
+    fn player_and_ghost_spawns_do_not_overlap() {
+        for seed in 0..200u32 {
+            let world = generate_world(10, seed);
+            assert!(!world.player_spawn_cells.is_empty());
+            assert!(!world.ghost_spawn_cells.is_empty());
+
+            for spawn in &world.player_spawn_cells {
+                let row = spawn.y / world.sector_size;
+                let col = spawn.x / world.sector_size;
+                let on_edge =
+                    row == 0 || col == 0 || row == world.side - 1 || col == world.side - 1;
+                assert!(on_edge);
+            }
+
+            for ghost_spawn in &world.ghost_spawn_cells {
+                let overlap = world
+                    .player_spawn_cells
+                    .iter()
+                    .any(|player_spawn| player_spawn == ghost_spawn);
+                assert!(!overlap);
+            }
+        }
+    }
 }
