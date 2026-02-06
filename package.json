@@ -17,6 +17,7 @@
     "test:server-world": "tsx src/server/world.selftest.ts",
     "test:server-game": "tsx src/server/game.selftest.ts",
     "simulate": "tsx src/server/simulate.ts",
+    "simulate:rust": "cargo run --manifest-path rust/server/Cargo.toml --bin simulate --",
     "start": "node dist/server/server/index.js"
   },
   "dependencies": {
