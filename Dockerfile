@@ -1,15 +1,12 @@
-FROM node:20-alpine AS build
+FROM rust:1.85-bookworm AS build
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci
 COPY . .
-RUN npm run build
+RUN cargo build --release --manifest-path rust/server/Cargo.toml --bin server
 
-FROM node:20-alpine
+FROM debian:bookworm-slim
 WORKDIR /app
-ENV NODE_ENV=production
-COPY package*.json ./
-RUN npm ci --omit=dev
-COPY --from=build /app/dist ./dist
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=build /app/rust/server/target/release/server /usr/local/bin/server
+ENV PORT=8080
 EXPOSE 8080
-CMD ["sh", "-c", "echo \"Rust WebSocket server is not implemented yet. See docs/deployment_cloud_run.md\" && exit 1"]
+CMD ["server"]
