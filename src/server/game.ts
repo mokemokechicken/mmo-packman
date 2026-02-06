@@ -19,7 +19,6 @@ import {
 import type {
   Difficulty,
   Direction,
-  FruitType,
   FruitView,
   GameConfig,
   GameOverReason,
@@ -36,6 +35,16 @@ import type {
   Vec2,
 } from '../shared/types.js';
 import { clamp, keyOf, makeId, manhattan } from './helpers.js';
+import {
+  isGateCellOrSwitch,
+} from './gate_utils.js';
+import {
+  isMoveDirection,
+  oppositeOf,
+  pickFruitType,
+  pickGhostType,
+  type MoveDirection,
+} from './game_rules.js';
 import { Rng } from './rng.js';
 import {
   type GeneratedWorld,
@@ -50,7 +59,6 @@ interface PlayerStats {
   captures: number;
 }
 
-type MoveDirection = Exclude<Direction, 'none'>;
 const AUTO_RESPAWN_GRACE_MS = 2_000;
 
 interface PlayerInternal extends PlayerView {
@@ -371,7 +379,10 @@ export class GameEngine {
         continue;
       }
       if (nowMs >= pellet.respawnAt) {
-        if (!this.isWalkable(pellet.x, pellet.y) || this.isGateCellOrSwitch(pellet.x, pellet.y)) {
+        if (
+          !this.isWalkable(pellet.x, pellet.y) ||
+          isGateCellOrSwitch(this.world.gates, pellet.x, pellet.y)
+        ) {
           pellet.respawnAt = nowMs + 1000;
           continue;
         }
@@ -1448,7 +1459,7 @@ export class GameEngine {
     if (this.isOccupiedByOtherStandingPlayer(cell.x, cell.y, playerId)) {
       return false;
     }
-    if (this.isGateCellOrSwitch(cell.x, cell.y)) {
+    if (isGateCellOrSwitch(this.world.gates, cell.x, cell.y)) {
       return false;
     }
     const nearestGhost = this.distanceToNearestGhost(cell.x, cell.y);
@@ -1571,25 +1582,11 @@ export class GameEngine {
     if (this.world.powerPellets.has(key)) {
       return false;
     }
-    if (this.isGateCellOrSwitch(x, y)) {
+    if (isGateCellOrSwitch(this.world.gates, x, y)) {
       return false;
     }
 
     return true;
-  }
-
-  private isGateCellOrSwitch(x: number, y: number): boolean {
-    for (const gate of this.world.gates) {
-      if (
-        (gate.a.x === x && gate.a.y === y) ||
-        (gate.b.x === x && gate.b.y === y) ||
-        (gate.switchA.x === x && gate.switchA.y === y) ||
-        (gate.switchB.x === x && gate.switchB.y === y)
-      ) {
-        return true;
-      }
-    }
-    return false;
   }
 
   private countGhostBySectorAndType(sectorId: number, type: GhostType): number {
@@ -1789,93 +1786,4 @@ export class GameEngine {
     }
     return positions;
   }
-}
-
-function pickGhostType(captureRatio: number, rng: Rng): GhostType {
-  const roll = rng.next();
-
-  if (captureRatio < 0.3) {
-    return roll < 0.75 ? 'random' : 'chaser';
-  }
-  if (captureRatio < 0.6) {
-    if (roll < 0.3) {
-      return 'random';
-    }
-    if (roll < 0.55) {
-      return 'chaser';
-    }
-    if (roll < 0.8) {
-      return 'patrol';
-    }
-    return 'pincer';
-  }
-  if (captureRatio < 0.9) {
-    if (roll < 0.2) {
-      return 'random';
-    }
-    if (roll < 0.4) {
-      return 'chaser';
-    }
-    if (roll < 0.6) {
-      return 'patrol';
-    }
-    if (roll < 0.8) {
-      return 'pincer';
-    }
-    return 'invader';
-  }
-
-  if (roll < 0.1) {
-    return 'random';
-  }
-  if (roll < 0.25) {
-    return 'chaser';
-  }
-  if (roll < 0.5) {
-    return 'pincer';
-  }
-  if (roll < 0.8) {
-    return 'invader';
-  }
-  return 'boss';
-}
-
-function pickFruitType(rng: Rng): FruitType {
-  const roll = rng.next();
-  if (roll < 0.2) {
-    return 'cherry';
-  }
-  if (roll < 0.35) {
-    return 'grape';
-  }
-  if (roll < 0.5) {
-    return 'orange';
-  }
-  if (roll < 0.65) {
-    return 'strawberry';
-  }
-  if (roll < 0.82) {
-    return 'key';
-  }
-  return 'apple';
-}
-
-function oppositeOf(dir: Direction): MoveDirection | null {
-  if (dir === 'up') {
-    return 'down';
-  }
-  if (dir === 'down') {
-    return 'up';
-  }
-  if (dir === 'left') {
-    return 'right';
-  }
-  if (dir === 'right') {
-    return 'left';
-  }
-  return null;
-}
-
-function isMoveDirection(dir: Direction): dir is MoveDirection {
-  return dir === 'up' || dir === 'down' || dir === 'left' || dir === 'right';
 }

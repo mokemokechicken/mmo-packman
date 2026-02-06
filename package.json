@@ -11,6 +11,16 @@
     "build:client": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
     "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "test": "npm run test:client-parser && npm run test:server-loop && npm run test:server-gate-utils && npm run test:server-game-rules && npm run test:server-world && npm run test:server-game && npm run test:server-reconnect && npm run test:server-session && npm run test:server-message-parser",
+    "test:client-parser": "tsx src/client/parseServerMessage.selftest.ts",
+    "test:server-loop": "tsx src/server/loop.selftest.ts",
+    "test:server-gate-utils": "tsx src/server/gate_utils.selftest.ts",
+    "test:server-game-rules": "tsx src/server/game_rules.selftest.ts",
+    "test:server-world": "tsx src/server/world.selftest.ts",
+    "test:server-game": "tsx src/server/game.selftest.ts",
+    "test:server-reconnect": "tsx src/server/reconnect.selftest.ts",
+    "test:server-session": "tsx src/server/session_manager.selftest.ts",
+    "test:server-message-parser": "tsx src/server/message_parser.selftest.ts",
     "simulate": "tsx src/server/simulate.ts",
     "start": "node dist/server/server/index.js"
   },
@@ -25,6 +35,6 @@
     "concurrently": "^9.2.1",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
-    "vite": "^7.1.3"
+    "vite": "^7.3.1"
   }
 }
