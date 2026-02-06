@@ -45,6 +45,12 @@ npm run start
 npm run check
 ```
 
+## 自動テスト
+
+```bash
+npm run test
+```
+
 ## AI-onlyテストプレイ（UI）
 
 1. ブラウザで `http://localhost:5173` を開く
