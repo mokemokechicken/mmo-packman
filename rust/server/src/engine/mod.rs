@@ -400,12 +400,17 @@ impl GameEngine {
             return;
         }
 
-        self.players[player_idx].ai_think_at = now_ms + self.rng.int(120, 260) as u64;
+        self.players[player_idx].ai_think_at = now_ms + self.rng.int(90, 190) as u64;
         let player = self.players[player_idx].view.clone();
         let nearest_ghost = self.distance_to_nearest_ghost(player.x, player.y);
 
+        if player.state == PlayerState::Power {
+            self.players[player_idx].desired_dir = self.choose_chase_direction(player.x, player.y);
+            return;
+        }
+
         if let Some(dist) = nearest_ghost {
-            if dist <= 2 {
+            if dist <= 4 {
                 if player.stocks > 0 && player.state != PlayerState::Power {
                     self.players[player_idx].awaken_requested = true;
                 }
@@ -415,8 +420,20 @@ impl GameEngine {
             }
         }
 
-        if player.state == PlayerState::Power {
-            self.players[player_idx].desired_dir = self.choose_chase_direction(player.x, player.y);
+        if let Some((down_idx, _)) = self.find_rescue_target(player_idx) {
+            let down = self.players[down_idx].view.clone();
+            let rescue_threat = self.distance_to_nearest_ghost(down.x, down.y).unwrap_or(99);
+            if rescue_threat <= 3 && player.stocks > 0 {
+                self.players[player_idx].awaken_requested = true;
+            }
+            self.players[player_idx].desired_dir =
+                self.choose_rescue_direction(player.x, player.y, down.x, down.y);
+            return;
+        }
+
+        if nearest_ghost.unwrap_or(99) <= 7 {
+            self.players[player_idx].desired_dir =
+                self.choose_safe_dot_direction(player.x, player.y);
             return;
         }
 
@@ -768,6 +785,21 @@ mod tests {
         (a - b).abs() <= eps
     }
 
+    fn first_walkable_neighbor(engine: &GameEngine, x: i32, y: i32) -> (Direction, i32, i32) {
+        for dir in [
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+            Direction::Right,
+        ] {
+            let (nx, ny) = super::offset(x, y, dir);
+            if engine.can_move_between(x, y, nx, ny) {
+                return (dir, nx, ny);
+            }
+        }
+        panic!("expected at least one walkable neighbor");
+    }
+
     #[test]
     fn same_seed_produces_same_progression() {
         let players = make_players(10);
@@ -996,6 +1028,196 @@ mod tests {
             engine.step(TICK_MS);
         }
         assert!(engine.ghosts.len() > before);
+    }
+
+    #[test]
+    fn ai_prefers_rescue_direction_when_teammate_is_downed() {
+        let mut engine = GameEngine::new(
+            make_players(2),
+            Difficulty::Normal,
+            2_001,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        engine.ghosts.clear();
+
+        let start_x = engine.players[0].view.x;
+        let start_y = engine.players[0].view.y;
+        let (expected_dir, target_x, target_y) = first_walkable_neighbor(&engine, start_x, start_y);
+        engine.players[1].view.state = PlayerState::Down;
+        engine.players[1].view.down_since = Some(engine.started_at_ms);
+        engine.players[1].view.x = target_x;
+        engine.players[1].view.y = target_y;
+        engine.players[0].ai_think_at = 0;
+
+        engine.update_player_ai(0, engine.started_at_ms + 1_000);
+        assert_eq!(engine.players[0].desired_dir as u8, expected_dir as u8);
+    }
+
+    #[test]
+    fn ai_requests_awaken_for_high_risk_rescue() {
+        let mut engine = GameEngine::new(
+            make_players(2),
+            Difficulty::Normal,
+            2_002,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        engine.ghosts.truncate(1);
+
+        engine.players[0].view.x = 10;
+        engine.players[0].view.y = 10;
+        engine.players[0].view.stocks = 1;
+        engine.players[0].view.state = PlayerState::Normal;
+        engine.players[0].awaken_requested = false;
+        engine.players[0].ai_think_at = 0;
+
+        engine.players[1].view.state = PlayerState::Down;
+        engine.players[1].view.down_since = Some(engine.started_at_ms);
+        engine.players[1].view.x = 14;
+        engine.players[1].view.y = 10;
+
+        set_floor(&mut engine, 10, 10);
+        set_floor(&mut engine, 11, 10);
+        set_floor(&mut engine, 12, 10);
+        set_floor(&mut engine, 13, 10);
+        set_floor(&mut engine, 14, 10);
+        set_floor(&mut engine, 15, 10);
+
+        engine.ghosts[0].view.x = 15;
+        engine.ghosts[0].view.y = 10;
+        assert!(
+            engine
+                .distance_to_nearest_ghost(10, 10)
+                .expect("ghost exists")
+                > 3
+        );
+        assert!(
+            engine
+                .distance_to_nearest_ghost(14, 10)
+                .expect("ghost exists")
+                <= 3
+        );
+
+        engine.update_player_ai(0, engine.started_at_ms + 1_000);
+        assert!(engine.players[0].awaken_requested);
+    }
+
+    #[test]
+    fn ai_escapes_before_rescue_when_self_in_danger() {
+        let mut engine = GameEngine::new(
+            make_players(2),
+            Difficulty::Normal,
+            2_004,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        engine.ghosts.truncate(1);
+
+        engine.players[0].view.x = 10;
+        engine.players[0].view.y = 10;
+        engine.players[0].view.stocks = 0;
+        engine.players[0].view.state = PlayerState::Normal;
+        engine.players[0].ai_think_at = 0;
+        engine.players[1].view.state = PlayerState::Down;
+        engine.players[1].view.down_since = Some(engine.started_at_ms);
+        engine.players[1].view.x = 11;
+        engine.players[1].view.y = 10;
+
+        set_floor(&mut engine, 10, 10);
+        set_floor(&mut engine, 9, 10);
+        set_floor(&mut engine, 10, 9);
+        set_floor(&mut engine, 10, 11);
+        set_floor(&mut engine, 11, 10);
+        engine.ghosts[0].view.x = 10;
+        engine.ghosts[0].view.y = 11;
+
+        let expected = engine.choose_escape_direction(10, 10);
+        engine.update_player_ai(0, engine.started_at_ms + 1_000);
+        assert_eq!(engine.players[0].desired_dir as u8, expected as u8);
+    }
+
+    #[test]
+    fn ai_holds_position_when_already_on_downed_player() {
+        let mut engine = GameEngine::new(
+            make_players(2),
+            Difficulty::Normal,
+            2_006,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        engine.ghosts.clear();
+
+        engine.players[0].view.x = 10;
+        engine.players[0].view.y = 10;
+        engine.players[0].view.state = PlayerState::Normal;
+        engine.players[0].ai_think_at = 0;
+        engine.players[1].view.state = PlayerState::Down;
+        engine.players[1].view.down_since = Some(engine.started_at_ms);
+        engine.players[1].view.x = 10;
+        engine.players[1].view.y = 10;
+
+        engine.update_player_ai(0, engine.started_at_ms + 1_000);
+        assert_eq!(engine.players[0].desired_dir as u8, Direction::None as u8);
+    }
+
+    #[test]
+    fn ai_power_state_keeps_chase_behavior() {
+        let mut engine = GameEngine::new(
+            make_players(1),
+            Difficulty::Normal,
+            2_005,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        engine.ghosts.truncate(1);
+
+        engine.players[0].view.x = 10;
+        engine.players[0].view.y = 10;
+        engine.players[0].view.state = PlayerState::Power;
+        engine.players[0].view.power_until = engine.started_at_ms + 10_000;
+        engine.players[0].ai_think_at = 0;
+        engine.ghosts[0].view.x = 12;
+        engine.ghosts[0].view.y = 10;
+
+        let expected = engine.choose_chase_direction(10, 10);
+        engine.update_player_ai(0, engine.started_at_ms + 1_000);
+        assert_eq!(engine.players[0].desired_dir as u8, expected as u8);
+    }
+
+    #[test]
+    fn choose_safe_dot_direction_avoids_adjacent_ghost_cell() {
+        let mut engine = GameEngine::new(
+            make_players(1),
+            Difficulty::Normal,
+            2_003,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        engine.ghosts.truncate(1);
+
+        let x = 10;
+        let y = 10;
+        engine.players[0].view.x = x;
+        engine.players[0].view.y = y;
+        set_floor(&mut engine, x, y);
+        set_floor(&mut engine, x - 1, y);
+        set_floor(&mut engine, x, y - 1);
+        set_floor(&mut engine, x, y + 1);
+        set_floor(&mut engine, x + 1, y);
+
+        engine.world.dots.insert((x + 1, y));
+        engine.ghosts[0].view.x = x + 1;
+        engine.ghosts[0].view.y = y;
+
+        let dir = engine.choose_safe_dot_direction(x, y);
+        assert_ne!(dir as u8, Direction::Right as u8);
     }
 
     #[test]

@@ -20,6 +20,36 @@
   - ゴースト速度補正をさらに下げる
   - フルーツ出現頻度を上げる
 
+## AI代行品質の定期観測（少人数離脱耐性）
+
+対象シナリオ:
+
+- `AI x2 / casual / 10分 / seed 1001-1010`
+
+観測指標:
+
+- `allDownRate`: `reason == all_down` の割合（目標: 20% 以下）
+- `avgRescues`: 平均救助回数（救助行動の実効性確認）
+- `avgMaxCapture`: 平均最大制覇率（進行停滞の早期検知）
+
+計測コマンド:
+
+```bash
+for seed in $(seq 1001 1010); do
+  npm run -s simulate -- --single --ai 2 --minutes 10 --difficulty casual --seed "$seed"
+done
+```
+
+最新計測（2026-02-07, issue #45 対応後）:
+
+- `allDownRate: 0.0%`（10試行中 0件）
+- `avgRescues: 1.2`
+- `avgMaxCapture: 5.0%`
+
+参考ベースライン（調整前）:
+
+- `allDownRate: 30.0%`（10試行中 3件）
+
 ## 既知のMVP制約
 
 - 永続化なし
