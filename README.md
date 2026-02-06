@@ -20,6 +20,7 @@ npm run dev
 - `npm run start` ビルド済み成果物で起動
 - `npm run simulate` AI-onlyシミュレーション（x2 / x5）
 - `npm run simulate:rust -- --single --ai 10 --minutes 10 --difficulty normal` Rust実装シミュレータ
+- `npm run test:parity -- --seed-count 10 --minutes 3` TS/Rust パリティ検証
 
 ## ドキュメント
 

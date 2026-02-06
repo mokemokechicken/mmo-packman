@@ -70,6 +70,14 @@ npm run simulate
 npm run simulate -- --single --ai 5 --minutes 10 --difficulty normal
 ```
 
+## TS/Rust パリティ検証
+
+```bash
+npm run test:parity -- --seed-count 10 --minutes 3
+```
+
+失敗時に seed と差分が表示されるので、`--seeds` または `--seed-start` を固定して再現確認する。
+
 ## 操作方法
 
 プレイヤーモード:
