@@ -764,7 +764,7 @@ impl GameEngine {
 
         for dir in dirs {
             let (nx, ny) = offset(x, y, dir);
-            if !self.can_move_to(nx, ny) {
+            if !self.can_move_between(x, y, nx, ny) {
                 continue;
             }
             let mut score = 0.0;
@@ -805,7 +805,7 @@ impl GameEngine {
         let mut best_dist = i32::MIN;
         for dir in dirs {
             let (nx, ny) = offset(x, y, dir);
-            if !self.can_move_to(nx, ny) {
+            if !self.can_move_between(x, y, nx, ny) {
                 continue;
             }
             let dist = self.distance_to_nearest_ghost(nx, ny).unwrap_or(99);
@@ -850,7 +850,7 @@ impl GameEngine {
 
         for (dir, _) in candidates {
             let (nx, ny) = offset(x, y, dir);
-            if self.can_move_to(nx, ny) {
+            if self.can_move_between(x, y, nx, ny) {
                 return dir;
             }
         }
@@ -859,8 +859,10 @@ impl GameEngine {
 
     fn advance_player_one_cell(&mut self, idx: usize) {
         let desired = self.players[idx].desired_dir;
-        let (dx, dy) = offset(self.players[idx].view.x, self.players[idx].view.y, desired);
-        if desired != Direction::None && self.can_move_to(dx, dy) {
+        let from_x = self.players[idx].view.x;
+        let from_y = self.players[idx].view.y;
+        let (dx, dy) = offset(from_x, from_y, desired);
+        if desired != Direction::None && self.can_move_between(from_x, from_y, dx, dy) {
             self.players[idx].view.x = dx;
             self.players[idx].view.y = dy;
             self.players[idx].view.dir = desired;
@@ -868,16 +870,16 @@ impl GameEngine {
         }
 
         let current = self.players[idx].view.dir;
-        let (cx, cy) = offset(self.players[idx].view.x, self.players[idx].view.y, current);
-        if current != Direction::None && self.can_move_to(cx, cy) {
+        let (cx, cy) = offset(from_x, from_y, current);
+        if current != Direction::None && self.can_move_between(from_x, from_y, cx, cy) {
             self.players[idx].view.x = cx;
             self.players[idx].view.y = cy;
             return;
         }
 
         let fallback = random_direction(&mut self.rng);
-        let (fx, fy) = offset(self.players[idx].view.x, self.players[idx].view.y, fallback);
-        if self.can_move_to(fx, fy) {
+        let (fx, fy) = offset(from_x, from_y, fallback);
+        if self.can_move_between(from_x, from_y, fx, fy) {
             self.players[idx].view.x = fx;
             self.players[idx].view.y = fy;
             self.players[idx].view.dir = fallback;
@@ -1024,14 +1026,27 @@ impl GameEngine {
         if sector_id >= self.world.sectors.len() {
             return false;
         }
-        if self.world.sectors[sector_id].respawn_candidates.is_empty() {
+        let candidates = self.world.sectors[sector_id].respawn_candidates.clone();
+        if candidates.is_empty() {
             return false;
         }
 
         for _ in 0..30 {
-            let len = self.world.sectors[sector_id].respawn_candidates.len();
-            let idx = self.rng.pick_index(len);
-            let cell = self.world.sectors[sector_id].respawn_candidates[idx];
+            let idx = self.rng.pick_index(candidates.len());
+            let cell = candidates[idx];
+            if !self.is_valid_dot_respawn_cell(sector_id, cell.x, cell.y) {
+                continue;
+            }
+            self.world.dots.insert((cell.x, cell.y));
+            self.world.sectors[sector_id].view.dot_count += 1;
+            self.events.push(RuntimeEvent::DotRespawned {
+                x: cell.x,
+                y: cell.y,
+            });
+            return true;
+        }
+
+        for cell in candidates {
             if !self.is_valid_dot_respawn_cell(sector_id, cell.x, cell.y) {
                 continue;
             }
@@ -1185,13 +1200,21 @@ impl GameEngine {
         });
     }
 
-    fn can_move_to(&self, x: i32, y: i32) -> bool {
-        if !is_walkable(&self.world, x, y) {
+    fn can_move_between(&self, from_x: i32, from_y: i32, to_x: i32, to_y: i32) -> bool {
+        if !is_walkable(&self.world, to_x, to_y) {
             return false;
         }
         for gate in &self.world.gates {
-            if !gate.open && ((gate.a.x == x && gate.a.y == y) || (gate.b.x == x && gate.b.y == y))
-            {
+            if gate.open {
+                continue;
+            }
+            let crosses_closed_gate =
+                (gate.a.x == from_x && gate.a.y == from_y && gate.b.x == to_x && gate.b.y == to_y)
+                    || (gate.b.x == from_x
+                        && gate.b.y == from_y
+                        && gate.a.x == to_x
+                        && gate.a.y == to_y);
+            if crosses_closed_gate {
                 return false;
             }
         }
@@ -1207,7 +1230,14 @@ impl GameEngine {
             self.ghosts[ghost_idx].view.y,
             dir,
         );
-        if dir != Direction::None && self.can_move_to(nx, ny) {
+        if dir != Direction::None
+            && self.can_move_between(
+                self.ghosts[ghost_idx].view.x,
+                self.ghosts[ghost_idx].view.y,
+                nx,
+                ny,
+            )
+        {
             self.ghosts[ghost_idx].view.x = nx;
             self.ghosts[ghost_idx].view.y = ny;
             self.ghosts[ghost_idx].view.dir = dir;
@@ -1220,7 +1250,12 @@ impl GameEngine {
             self.ghosts[ghost_idx].view.y,
             fallback,
         );
-        if self.can_move_to(fx, fy) {
+        if self.can_move_between(
+            self.ghosts[ghost_idx].view.x,
+            self.ghosts[ghost_idx].view.y,
+            fx,
+            fy,
+        ) {
             self.ghosts[ghost_idx].view.x = fx;
             self.ghosts[ghost_idx].view.y = fy;
             self.ghosts[ghost_idx].view.dir = fallback;
@@ -1361,7 +1396,10 @@ mod tests {
 
     use crate::constants::TICK_MS;
     use crate::engine::{GameEngine, GameEngineOptions};
-    use crate::types::{Difficulty, Direction, PlayerState, RuntimeEvent, StartPlayer};
+    use crate::rng::Rng;
+    use crate::types::{
+        Difficulty, Direction, GateState, PlayerState, RuntimeEvent, StartPlayer, Vec2,
+    };
 
     fn make_players(count: usize) -> Vec<StartPlayer> {
         (0..count)
@@ -1372,6 +1410,22 @@ mod tests {
                 connected: false,
             })
             .collect()
+    }
+
+    fn set_floor(engine: &mut GameEngine, x: i32, y: i32) {
+        let row = engine
+            .world
+            .tiles
+            .get_mut(y as usize)
+            .expect("row in bounds")
+            .clone();
+        let mut bytes = row.into_bytes();
+        bytes[x as usize] = b'.';
+        *engine
+            .world
+            .tiles
+            .get_mut(y as usize)
+            .expect("row in bounds") = String::from_utf8(bytes).expect("valid utf8 row");
     }
 
     #[test]
@@ -1481,5 +1535,77 @@ mod tests {
         let second = engine.build_snapshot(true);
         assert_eq!(first.events.len(), 1);
         assert_eq!(second.events.len(), 0);
+    }
+
+    #[test]
+    fn closed_gate_blocks_crossing_but_allows_endpoint_entry() {
+        let mut engine = GameEngine::new(
+            make_players(1),
+            Difficulty::Normal,
+            444,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+
+        set_floor(&mut engine, 4, 5);
+        set_floor(&mut engine, 5, 5);
+        set_floor(&mut engine, 6, 5);
+        set_floor(&mut engine, 5, 4);
+        set_floor(&mut engine, 6, 4);
+
+        engine.world.gates.clear();
+        engine.world.gates.push(GateState {
+            id: "gate_test".to_string(),
+            a: Vec2 { x: 5, y: 5 },
+            b: Vec2 { x: 6, y: 5 },
+            switch_a: Vec2 { x: 5, y: 4 },
+            switch_b: Vec2 { x: 6, y: 4 },
+            open: false,
+            permanent: false,
+        });
+
+        assert!(engine.can_move_between(4, 5, 5, 5));
+        assert!(!engine.can_move_between(5, 5, 6, 5));
+    }
+
+    #[test]
+    fn respawn_dot_fallback_scans_all_candidates() {
+        let mut engine = GameEngine::new(
+            make_players(5),
+            Difficulty::Normal,
+            555,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+
+        let sector_id = engine
+            .world
+            .sectors
+            .iter()
+            .position(|sector| sector.respawn_candidates.len() >= 2)
+            .expect("at least one sector has respawn candidates");
+        let valid = engine.world.sectors[sector_id].respawn_candidates[0];
+        let invalid = engine.world.sectors[sector_id].respawn_candidates[1];
+
+        engine.world.dots.insert((invalid.x, invalid.y));
+        engine.world.dots.remove(&(valid.x, valid.y));
+
+        let mut forced_candidates = vec![invalid; 99];
+        forced_candidates.push(valid);
+        engine.world.sectors[sector_id].respawn_candidates = forced_candidates;
+
+        let seed = (0..10_000u32)
+            .find(|seed| {
+                let mut rng = Rng::new(*seed);
+                (0..30).all(|_| rng.pick_index(100) != 99)
+            })
+            .expect("find deterministic seed for random-miss phase");
+        engine.rng = Rng::new(seed);
+
+        let respawned = engine.respawn_dot_in_sector(sector_id);
+        assert!(respawned);
+        assert!(engine.world.dots.contains(&(valid.x, valid.y)));
     }
 }
