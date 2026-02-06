@@ -11,6 +11,7 @@ import type {
   LobbyPlayer,
   ServerMessage,
 } from '../shared/types.js';
+import { resolveLoopProgress } from './loop.js';
 import { GameEngine, type StartPlayer } from './game.js';
 
 interface ClientContext {
@@ -24,6 +25,8 @@ interface LobbyPlayerInternal extends LobbyPlayer {
 }
 
 const PORT = Number(process.env.PORT ?? 8080);
+const MAX_FRAME_DELTA_MS = 1_000;
+const MAX_STEPS_PER_INTERVAL = Math.ceil(MAX_FRAME_DELTA_MS / TICK_MS);
 
 const app = express();
 const server = http.createServer(app);
@@ -337,13 +340,39 @@ function handleLobbyStart(
     });
   }
 
+  let previousLoopAt = performance.now();
+  let accumulatorMs = 0;
+
   loop = setInterval(() => {
     const running = game;
     if (!running) {
       return;
     }
 
-    running.step(TICK_MS);
+    const now = performance.now();
+    const deltaMs = now - previousLoopAt;
+    previousLoopAt = now;
+
+    const progress = resolveLoopProgress({
+      accumulatorMs,
+      deltaMs,
+      tickMs: TICK_MS,
+      maxSteps: MAX_STEPS_PER_INTERVAL,
+      maxDeltaMs: MAX_FRAME_DELTA_MS,
+    });
+    accumulatorMs = progress.accumulatorMs;
+
+    if (progress.steps === 0) {
+      return;
+    }
+
+    for (let step = 0; step < progress.steps; step += 1) {
+      running.step(TICK_MS);
+      if (running.isEnded()) {
+        break;
+      }
+    }
+
     const snapshot = running.buildSnapshot(true);
     broadcast({ type: 'state', snapshot });
 
