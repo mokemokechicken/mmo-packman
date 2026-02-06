@@ -61,7 +61,7 @@ pub enum Difficulty {
 }
 
 impl Difficulty {
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "casual" => Some(Self::Casual),
             "normal" => Some(Self::Normal),

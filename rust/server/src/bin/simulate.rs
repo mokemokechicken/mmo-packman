@@ -225,7 +225,7 @@ fn resolve_scenarios(cli: &Cli) -> Vec<Scenario> {
     let difficulty = cli
         .difficulty
         .as_deref()
-        .and_then(Difficulty::from_str)
+        .and_then(Difficulty::parse)
         .unwrap_or(Difficulty::Normal);
 
     if cli.single || cli.ai.is_some() || cli.minutes.is_some() {

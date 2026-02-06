@@ -136,7 +136,7 @@ impl GameEngine {
                 spawn,
                 reconnect_token: start.reconnect_token.clone(),
                 awaken_requested: false,
-                remote_revive_grace_until: started_at_ms + 5_000,
+                remote_revive_grace_until: 0,
                 ai_think_at: rng.int(50, 180) as u64,
                 hold_until_ms: 0,
                 stats: PlayerStats::default(),
@@ -190,7 +190,6 @@ impl GameEngine {
         if self.ended {
             return;
         }
-        self.events.clear();
         self.tick_counter += 1;
         self.elapsed_ms = self.elapsed_ms.saturating_add(dt_ms);
         let now_ms = self.started_at_ms.saturating_add(self.elapsed_ms);
@@ -215,8 +214,10 @@ impl GameEngine {
             &ghost_positions_before_move,
         );
         self.update_sector_control(dt_ms, now_ms);
-        self.adjust_ghost_population(now_ms);
-        self.emit_progress_milestones();
+        if self.tick_counter.is_multiple_of(TICK_RATE as u64) {
+            self.adjust_ghost_population(now_ms);
+            self.emit_progress_milestones();
+        }
         self.check_game_over(now_ms);
     }
 
@@ -685,7 +686,7 @@ impl GameEngine {
             .players
             .iter()
             .all(|p| p.view.state == PlayerState::Down);
-        if all_down && self.elapsed_ms >= 10_000 {
+        if all_down {
             self.ended = true;
             self.end_reason = Some(GameOverReason::AllDown);
             self.timeline.push(TimelineEvent {
@@ -959,6 +960,8 @@ impl GameEngine {
     }
 
     fn auto_respawn(&mut self, idx: usize, now_ms: u64) {
+        self.players[idx].view.gauge = 0;
+        self.players[idx].view.stocks = (self.players[idx].view.stocks - 1).max(0);
         let player_id = self.players[idx].view.id.clone();
         self.revived_player(idx, now_ms, true, player_id);
     }
@@ -1607,5 +1610,78 @@ mod tests {
         let respawned = engine.respawn_dot_in_sector(sector_id);
         assert!(respawned);
         assert!(engine.world.dots.contains(&(valid.x, valid.y)));
+    }
+
+    #[test]
+    fn events_are_preserved_until_snapshot_drains() {
+        let mut engine = GameEngine::new(
+            make_players(2),
+            Difficulty::Normal,
+            777,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        engine.events.push(RuntimeEvent::Toast {
+            message: "carry".to_string(),
+        });
+
+        engine.step(TICK_MS);
+        let snapshot = engine.build_snapshot(true);
+        let has_carry = snapshot
+            .events
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::Toast { message } if message == "carry"));
+        assert!(has_carry);
+    }
+
+    #[test]
+    fn ghost_population_adjusts_once_per_second() {
+        let mut engine = GameEngine::new(
+            make_players(5),
+            Difficulty::Normal,
+            888,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        for player in &mut engine.players {
+            player.view.state = PlayerState::Power;
+            player.view.power_until = u64::MAX;
+        }
+        engine.ghosts.truncate(1);
+        let before = engine.ghosts.len();
+
+        engine.step(TICK_MS);
+        assert_eq!(engine.ghosts.len(), before);
+
+        for _ in 1..20 {
+            engine.step(TICK_MS);
+        }
+        assert!(engine.ghosts.len() > before);
+    }
+
+    #[test]
+    fn auto_respawn_applies_gauge_and_stock_cost() {
+        let mut engine = GameEngine::new(
+            make_players(1),
+            Difficulty::Normal,
+            999,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        engine.players[0].view.state = PlayerState::Down;
+        engine.players[0].view.down_since = Some(engine.started_at_ms);
+        engine.players[0].view.gauge = 35;
+        engine.players[0].view.stocks = 2;
+
+        engine.auto_respawn(0, engine.started_at_ms + 10_000);
+        assert_eq!(
+            engine.players[0].view.state as u8,
+            PlayerState::Normal as u8
+        );
+        assert_eq!(engine.players[0].view.gauge, 0);
+        assert_eq!(engine.players[0].view.stocks, 1);
     }
 }
