@@ -7,7 +7,7 @@
 - 通信: JSON over WebSocket
 
 ```text
-Browser Client
+Browser Client (Player / Spectator)
   -> WebSocket (/ws)
 Game Server (authoritative)
   - Lobby / Match lifecycle
@@ -24,21 +24,25 @@ Game Server (authoritative)
 
 ## サーバー責務
 
-- ロビー管理（ホスト、開始、再接続）
+- ロビー管理（ホスト、開始、再接続、観戦）
+- AI-only試合の組成（AI人数指定）
 - プレイヤー入力適用
 - 物理更新（タイル移動）
 - 衝突判定
 - エリア制覇・劣化
 - ゴーストAI
+- プレイヤーAI（救助・探索・防衛・逃走）
 - 勝敗判定
 - スナップショット配信
 
 ## クライアント責務
 
 - 入力送信（方向、覚醒）
+- 観戦参加送信
 - スナップショット描画
 - イベント適用（ドット消失/再生成など）
 - HUD / ロビー / リザルト表示
+- 観戦カメラ（追従対象切替）
 
 ## ティック処理順
 
@@ -64,3 +68,4 @@ Game Server (authoritative)
 - `src/shared/types.ts` にプロトコルを集約
 - `GameEngine` にゲームルールを集約
 - ワールド生成は `world.ts` として分離
+- AI-only検証は `src/server/simulate.ts` で独立実行

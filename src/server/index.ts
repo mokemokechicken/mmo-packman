@@ -47,6 +47,7 @@ const lobbyPlayers = new Map<string, LobbyPlayerInternal>();
 let hostId: string | null = null;
 let game: GameEngine | null = null;
 let loop: NodeJS.Timeout | null = null;
+let runningAiCount = 0;
 
 wss.on('connection', (ws) => {
   const clientId = randomUUID();
@@ -61,7 +62,7 @@ wss.on('connection', (ws) => {
     }
 
     if (message.type === 'hello') {
-      handleHello(ctx, message.name, message.reconnectToken);
+      handleHello(ctx, message.name, !!message.spectator, message.reconnectToken);
       return;
     }
 
@@ -76,7 +77,12 @@ wss.on('connection', (ws) => {
     }
 
     if (message.type === 'lobby_start') {
-      handleLobbyStart(ctx.playerId, message.difficulty ?? 'normal');
+      handleLobbyStart(
+        ctx.playerId,
+        message.difficulty ?? 'normal',
+        message.aiPlayerCount,
+        message.timeLimitMinutes,
+      );
       return;
     }
 
@@ -92,20 +98,25 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    const player = lobbyPlayers.get(ctx.playerId);
-    if (!player) {
+    const member = lobbyPlayers.get(ctx.playerId);
+    if (!member) {
       return;
     }
 
     if (game) {
-      player.connected = false;
-      player.ai = true;
-      game.setPlayerConnection(ctx.playerId, false);
-    } else {
-      lobbyPlayers.delete(ctx.playerId);
-      if (hostId === ctx.playerId) {
-        hostId = chooseNextHost();
+      if (member.spectator) {
+        lobbyPlayers.delete(member.id);
+      } else {
+        member.connected = false;
+        member.ai = true;
+        game.setPlayerConnection(member.id, false);
       }
+    } else {
+      lobbyPlayers.delete(member.id);
+    }
+
+    if (hostId === member.id) {
+      hostId = chooseNextHost();
     }
 
     broadcastLobby();
@@ -116,93 +127,119 @@ server.listen(PORT, () => {
   console.log(`[server] listening on :${PORT}`);
 });
 
-function handleHello(ctx: ClientContext, requestedName: string, reconnectToken?: string): void {
+function handleHello(ctx: ClientContext, requestedName: string, spectatorRequested: boolean, reconnectToken?: string): void {
   const name = sanitizeName(requestedName);
   const existing = reconnectToken ? findPlayerByToken(reconnectToken) : null;
 
-  if (game) {
-    if (!existing || !game.hasPlayer(existing.id)) {
+  if (existing) {
+    if (game && !existing.spectator && !game.hasPlayer(existing.id)) {
       send(ctx.ws, { type: 'error', message: 'game already running; reconnection only' });
       return;
     }
 
+    // 試合中はロール変更不可。ロビー中のみプレイヤー/観戦を切り替えられる。
+    if (!game) {
+      existing.spectator = spectatorRequested;
+    }
+
+    existing.name = name;
     existing.connected = true;
     existing.ai = false;
     ctx.playerId = existing.id;
-    game.setPlayerConnection(existing.id, true);
+
+    if (game && !existing.spectator) {
+      game.setPlayerConnection(existing.id, true);
+    }
 
     send(ctx.ws, {
       type: 'welcome',
       playerId: existing.id,
       reconnectToken: existing.reconnectToken,
       isHost: hostId === existing.id,
+      isSpectator: existing.spectator,
     });
 
+    if (game) {
+      send(ctx.ws, {
+        type: 'game_init',
+        meId: existing.id,
+        world: game.getWorldInit(),
+        config: game.config,
+        startedAtMs: game.startedAtMs,
+        isSpectator: existing.spectator,
+      });
+
+      send(ctx.ws, {
+        type: 'state',
+        snapshot: game.buildSnapshot(false),
+      });
+    }
+
+    broadcastLobby();
+    return;
+  }
+
+  if (game && !spectatorRequested) {
+    send(ctx.ws, { type: 'error', message: 'game already running; reconnection or spectator only' });
+    return;
+  }
+
+  const playerId = randomUUID();
+  const token = randomUUID();
+  const member: LobbyPlayerInternal = {
+    id: playerId,
+    name,
+    connected: true,
+    ai: false,
+    spectator: spectatorRequested,
+    isHost: false,
+    reconnectToken: token,
+  };
+
+  lobbyPlayers.set(member.id, member);
+  ctx.playerId = member.id;
+
+  if (!hostId) {
+    hostId = member.id;
+  }
+
+  send(ctx.ws, {
+    type: 'welcome',
+    playerId: member.id,
+    reconnectToken: member.reconnectToken,
+    isHost: hostId === member.id,
+    isSpectator: member.spectator,
+  });
+
+  if (game) {
     send(ctx.ws, {
       type: 'game_init',
-      meId: existing.id,
+      meId: member.id,
       world: game.getWorldInit(),
       config: game.config,
       startedAtMs: game.startedAtMs,
+      isSpectator: member.spectator,
     });
 
     send(ctx.ws, {
       type: 'state',
       snapshot: game.buildSnapshot(false),
     });
-
-    broadcastLobby();
-    return;
   }
-
-  if (existing) {
-    existing.connected = true;
-    existing.ai = false;
-    existing.name = name;
-    ctx.playerId = existing.id;
-
-    send(ctx.ws, {
-      type: 'welcome',
-      playerId: existing.id,
-      reconnectToken: existing.reconnectToken,
-      isHost: hostId === existing.id,
-    });
-
-    broadcastLobby();
-    return;
-  }
-
-  const playerId = randomUUID();
-  const token = randomUUID();
-  const player: LobbyPlayerInternal = {
-    id: playerId,
-    name,
-    connected: true,
-    ai: false,
-    isHost: false,
-    reconnectToken: token,
-  };
-  lobbyPlayers.set(player.id, player);
-  ctx.playerId = player.id;
-
-  if (!hostId) {
-    hostId = player.id;
-  }
-
-  send(ctx.ws, {
-    type: 'welcome',
-    playerId: player.id,
-    reconnectToken: token,
-    isHost: hostId === player.id,
-  });
 
   broadcastLobby();
 }
 
-function handleLobbyStart(requestedBy: string, difficulty: Difficulty): void {
+function handleLobbyStart(
+  requestedBy: string,
+  difficulty: Difficulty,
+  aiPlayerCount?: number,
+  timeLimitMinutes?: number,
+): void {
   if (game) {
     return;
   }
+
   if (requestedBy !== hostId) {
     const target = getClientByPlayerId(requestedBy);
     if (target) {
@@ -211,41 +248,72 @@ function handleLobbyStart(requestedBy: string, difficulty: Difficulty): void {
     return;
   }
 
-  const participants = Array.from(lobbyPlayers.values()).filter((player) => player.connected);
-  if (participants.length === 0) {
-    return;
-  }
-
-  const startPlayers: StartPlayer[] = participants.map((player) => ({
+  const humanParticipants = Array.from(lobbyPlayers.values()).filter((player) => player.connected && !player.spectator);
+  const aiCount = normalizeAiCount(aiPlayerCount);
+  const startPlayers: StartPlayer[] = humanParticipants.map((player) => ({
     id: player.id,
     name: player.name,
     reconnectToken: player.reconnectToken,
     connected: player.connected,
   }));
 
-  game = new GameEngine(startPlayers, difficulty);
+  for (let i = 0; i < aiCount; i += 1) {
+    startPlayers.push({
+      id: `ai_${randomUUID().slice(0, 8)}`,
+      name: `AI-${(i + 1).toString().padStart(2, '0')}`,
+      reconnectToken: randomUUID(),
+      connected: false,
+    });
+  }
+
+  if (startPlayers.length === 0) {
+    const target = getClientByPlayerId(requestedBy);
+    if (target) {
+      send(target.ws, { type: 'error', message: 'no players. set AI players or join as player.' });
+    }
+    return;
+  }
+
+  const timeLimitMsOverride = normalizeTimeLimitMs(timeLimitMinutes);
+  game = new GameEngine(startPlayers, difficulty, Date.now(), { timeLimitMsOverride });
+  runningAiCount = aiCount;
 
   for (const player of lobbyPlayers.values()) {
+    if (player.spectator) {
+      player.ai = false;
+      continue;
+    }
+
     if (!game.hasPlayer(player.id)) {
       lobbyPlayers.delete(player.id);
       continue;
     }
+
     player.ai = !player.connected;
   }
 
-  broadcastLobby('ゲーム開始');
+  const startNote = `ゲーム開始 (human:${humanParticipants.length}, ai:${aiCount}, limit:${Math.floor(
+    game.config.timeLimitMs / 60_000,
+  )}m)`;
+  broadcastLobby(startNote);
 
-  for (const player of startPlayers) {
-    const client = getClientByPlayerId(player.id);
+  for (const member of lobbyPlayers.values()) {
+    if (!member.connected) {
+      continue;
+    }
+
+    const client = getClientByPlayerId(member.id);
     if (!client) {
       continue;
     }
+
     send(client.ws, {
       type: 'game_init',
-      meId: player.id,
+      meId: member.id,
       world: game.getWorldInit(),
       config: game.config,
       startedAtMs: game.startedAtMs,
+      isSpectator: member.spectator,
     });
   }
 
@@ -269,10 +337,16 @@ function handleLobbyStart(requestedBy: string, difficulty: Difficulty): void {
       }
 
       game = null;
-      hostId = hostId && lobbyPlayers.has(hostId) ? hostId : chooseNextHost();
+      runningAiCount = 0;
+
       for (const player of lobbyPlayers.values()) {
         player.ai = false;
       }
+
+      if (hostId && !lobbyPlayers.get(hostId)?.connected) {
+        hostId = chooseNextHost();
+      }
+
       broadcastLobby('ゲーム終了。再スタート可能です');
     }
   }, TICK_MS);
@@ -286,16 +360,22 @@ function broadcastLobby(note?: string): void {
       name: player.name,
       connected: player.connected,
       ai: player.ai,
+      spectator: player.spectator,
       isHost: player.id === hostId,
     }));
+
+  const spectatorCount = ordered.filter((player) => player.spectator).length;
+  const canStart = !!hostId && !!lobbyPlayers.get(hostId)?.connected;
+  const composedNote = runningAiCount > 0 && !note ? `AI稼働中: ${runningAiCount}` : note;
 
   broadcast({
     type: 'lobby',
     players: ordered,
     hostId,
-    canStart: !!hostId && ordered.some((p) => p.id === hostId && p.connected),
+    canStart,
     running: !!game,
-    note,
+    spectatorCount,
+    note: composedNote,
   });
 }
 
@@ -360,4 +440,19 @@ function getClientByPlayerId(playerId: string): ClientContext | null {
     }
   }
   return null;
+}
+
+function normalizeAiCount(value: number | undefined): number {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, Math.floor(value)));
+}
+
+function normalizeTimeLimitMs(value: number | undefined): number | undefined {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return undefined;
+  }
+  const minutes = Math.max(1, Math.min(10, Math.floor(value)));
+  return minutes * 60_000;
 }

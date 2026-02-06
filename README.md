@@ -18,6 +18,7 @@ npm run dev
 - `npm run check` 型チェック
 - `npm run build` 本番ビルド
 - `npm run start` ビルド済み成果物で起動
+- `npm run simulate` AI-onlyシミュレーション（x2 / x5）
 
 ## ドキュメント
 

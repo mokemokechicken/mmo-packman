@@ -5,6 +5,7 @@ import type {
   GameConfig,
   GameSummary,
   GhostView,
+  LobbyPlayer,
   PlayerView,
   RuntimeEvent,
   ServerMessage,
@@ -26,8 +27,14 @@ let ws: WebSocket | null = null;
 let reconnectTimer: number | null = null;
 let reconnectToken = localStorage.getItem('mmo-packman-token') ?? '';
 let playerName = localStorage.getItem('mmo-packman-name') ?? `Player-${Math.floor(Math.random() * 1000)}`;
+let preferSpectator = localStorage.getItem('mmo-packman-spectator') === '1';
+let requestedAiCount = normalizeNumber(localStorage.getItem('mmo-packman-ai-count'), 2, 0, 100);
+let requestedTestMinutes = normalizeNumber(localStorage.getItem('mmo-packman-test-minutes'), 5, 1, 10);
+
+let sessionId = '';
 let meId = '';
 let isHost = false;
+let isSpectator = preferSpectator;
 let world: WorldInit | null = null;
 let config: GameConfig | null = null;
 let snapshot: Snapshot | null = null;
@@ -35,6 +42,7 @@ let summary: GameSummary | null = null;
 let lobbyMessage = '';
 let logs: string[] = [];
 let currentDir: 'up' | 'down' | 'left' | 'right' | 'none' = 'none';
+let followPlayerId: string | null = null;
 
 start();
 
@@ -52,12 +60,7 @@ function connect(): void {
   ws = new WebSocket(url);
 
   ws.addEventListener('open', () => {
-    const hello: ClientMessage = {
-      type: 'hello',
-      name: playerName,
-      reconnectToken: reconnectToken || undefined,
-    };
-    send(hello);
+    sendHello();
   });
 
   ws.addEventListener('message', (event) => {
@@ -76,6 +79,16 @@ function connect(): void {
       connect();
     }, 1500);
   });
+}
+
+function sendHello(): void {
+  const hello: ClientMessage = {
+    type: 'hello',
+    name: playerName,
+    reconnectToken: reconnectToken || undefined,
+    spectator: preferSpectator,
+  };
+  send(hello);
 }
 
 function wsUrl(): string {
@@ -99,17 +112,19 @@ function safeParse(raw: string): ServerMessage | null {
 
 function handleServerMessage(message: ServerMessage): void {
   if (message.type === 'welcome') {
-    meId = message.playerId;
+    sessionId = message.playerId;
     isHost = message.isHost;
     reconnectToken = message.reconnectToken;
+    isSpectator = message.isSpectator;
     localStorage.setItem('mmo-packman-token', reconnectToken);
+    updateTouchControlsVisibility();
     return;
   }
 
   if (message.type === 'lobby') {
-    isHost = message.hostId === meId;
+    isHost = message.hostId === sessionId;
     lobbyMessage = message.note ?? '';
-    renderLobby(message.players, message.running);
+    renderLobby(message.players, message.running, message.canStart, message.spectatorCount);
     return;
   }
 
@@ -117,8 +132,10 @@ function handleServerMessage(message: ServerMessage): void {
     meId = message.meId;
     world = message.world;
     config = message.config;
+    isSpectator = message.isSpectator;
     summary = null;
     logs = [];
+    followPlayerId = null;
     dotSet.clear();
     pelletMap.clear();
 
@@ -131,6 +148,7 @@ function handleServerMessage(message: ServerMessage): void {
 
     lobby.classList.add('hidden');
     result.classList.add('hidden');
+    updateTouchControlsVisibility();
     return;
   }
 
@@ -194,7 +212,7 @@ function applyEvent(event: RuntimeEvent): void {
   }
 }
 
-function renderLobby(players: Array<{ id: string; name: string; connected: boolean; ai: boolean; isHost: boolean }>, running: boolean): void {
+function renderLobby(players: LobbyPlayer[], running: boolean, canStart: boolean, spectatorCount: number): void {
   lobby.classList.remove('hidden');
 
   const difficultyOptions: Array<{ value: Difficulty; label: string }> = [
@@ -204,50 +222,105 @@ function renderLobby(players: Array<{ id: string; name: string; connected: boole
     { value: 'nightmare', label: 'Nightmare' },
   ];
 
+  const activePlayers = players.filter((p) => !p.spectator).length;
+
   lobby.innerHTML = `
     <div class="panel">
       <h1>MMO Packman Prototype</h1>
-      <p class="muted">サーバー権威 / 20Hz / 協力攻略</p>
+      <p class="muted">AI-onlyテスト対応 / 観戦モード対応</p>
+
       <label>名前
         <input id="name-input" value="${escapeHtml(playerName)}" maxlength="16" />
       </label>
+
+      <label>参加モード
+        <select id="mode-select">
+          <option value="player" ${preferSpectator ? '' : 'selected'}>プレイヤー</option>
+          <option value="spectator" ${preferSpectator ? 'selected' : ''}>観戦</option>
+        </select>
+      </label>
+
       <label>難易度
         <select id="difficulty-select">
           ${difficultyOptions.map((o) => `<option value="${o.value}">${o.label}</option>`).join('')}
         </select>
       </label>
-      <button id="save-name">名前を保存</button>
-      <button id="start-game" ${isHost && !running ? '' : 'disabled'}>${running ? '進行中' : 'ゲーム開始'}</button>
-      <p class="muted">${lobbyMessage || 'Host が開始します。進行中は再接続のみ可能。'}</p>
-      <h2>ロビー (${players.length})</h2>
+
+      <label>AIプレイヤー数（0-100）
+        <input id="ai-count" type="number" min="0" max="100" value="${requestedAiCount}" />
+      </label>
+
+      <label>テスト時間（分, 1-10）
+        <input id="test-minutes" type="number" min="1" max="10" value="${requestedTestMinutes}" />
+      </label>
+
+      <button id="save-profile">設定を保存</button>
+      <button id="start-game" ${isHost && canStart && !running ? '' : 'disabled'}>${running ? '進行中' : 'テスト開始'}</button>
+      <p class="muted">${lobbyMessage || 'Host が開始します。観戦者は進行中でも接続可能です。'}</p>
+
+      <h2>ロビー</h2>
+      <p class="muted">member:${players.length} / player:${activePlayers} / spectator:${spectatorCount}</p>
       <ul>
         ${players
-          .map(
-            (p) => `<li>${p.name} ${p.isHost ? '👑' : ''} ${p.connected ? '' : '(切断)'} ${p.ai ? '[AI]' : ''}</li>`,
-          )
+          .map((p) => {
+            const tags = [
+              p.isHost ? '👑' : '',
+              p.spectator ? '[観戦]' : '[参加]',
+              p.connected ? '' : '(切断)',
+              p.ai ? '[AI代行]' : '',
+            ]
+              .filter(Boolean)
+              .join(' ');
+            return `<li>${escapeHtml(p.name)} ${tags}</li>`;
+          })
           .join('')}
       </ul>
-      <p class="hint">操作: 方向キー/WASD で移動, Space/E で覚醒</p>
+
+      <p class="hint">AI-onlyテスト: 観戦モード + AI人数(2/5など) で開始</p>
+      <p class="hint">プレイヤー操作: 方向キー/WASD, 覚醒: Space/E/Enter</p>
     </div>
   `;
 
-  const saveName = document.getElementById('save-name');
+  const saveProfile = document.getElementById('save-profile');
   const startButton = document.getElementById('start-game');
 
-  saveName?.addEventListener('click', () => {
-    const input = document.getElementById('name-input') as HTMLInputElement | null;
-    if (!input) {
-      return;
-    }
-    playerName = input.value.trim().slice(0, 16) || playerName;
+  saveProfile?.addEventListener('click', () => {
+    const nameInput = document.getElementById('name-input') as HTMLInputElement | null;
+    const modeSelect = document.getElementById('mode-select') as HTMLSelectElement | null;
+    const aiInput = document.getElementById('ai-count') as HTMLInputElement | null;
+    const minutesInput = document.getElementById('test-minutes') as HTMLInputElement | null;
+
+    playerName = nameInput?.value.trim().slice(0, 16) || playerName;
+    preferSpectator = modeSelect?.value === 'spectator';
+    requestedAiCount = normalizeNumber(aiInput?.value ?? '', requestedAiCount, 0, 100);
+    requestedTestMinutes = normalizeNumber(minutesInput?.value ?? '', requestedTestMinutes, 1, 10);
+
     localStorage.setItem('mmo-packman-name', playerName);
-    send({ type: 'hello', name: playerName, reconnectToken: reconnectToken || undefined });
+    localStorage.setItem('mmo-packman-spectator', preferSpectator ? '1' : '0');
+    localStorage.setItem('mmo-packman-ai-count', String(requestedAiCount));
+    localStorage.setItem('mmo-packman-test-minutes', String(requestedTestMinutes));
+
+    sendHello();
   });
 
   startButton?.addEventListener('click', () => {
     const select = document.getElementById('difficulty-select') as HTMLSelectElement | null;
+    const aiInput = document.getElementById('ai-count') as HTMLInputElement | null;
+    const minutesInput = document.getElementById('test-minutes') as HTMLInputElement | null;
+
     const difficulty = (select?.value as Difficulty) ?? 'normal';
-    send({ type: 'lobby_start', difficulty });
+    requestedAiCount = normalizeNumber(aiInput?.value ?? '', requestedAiCount, 0, 100);
+    requestedTestMinutes = normalizeNumber(minutesInput?.value ?? '', requestedTestMinutes, 1, 10);
+
+    localStorage.setItem('mmo-packman-ai-count', String(requestedAiCount));
+    localStorage.setItem('mmo-packman-test-minutes', String(requestedTestMinutes));
+
+    send({
+      type: 'lobby_start',
+      difficulty,
+      aiPlayerCount: requestedAiCount,
+      timeLimitMinutes: requestedTestMinutes,
+    });
   });
 }
 
@@ -295,6 +368,14 @@ function wireKeyboard(): void {
   };
 
   window.addEventListener('keydown', (event) => {
+    if (isSpectator) {
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        cycleSpectatorTarget();
+      }
+      return;
+    }
+
     const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
     const dir = dirMap[key];
     if (dir && dir !== currentDir) {
@@ -321,9 +402,11 @@ function wireTouchControls(): void {
     return;
   }
 
-  touchControls.classList.remove('hidden');
-
   touchControls.addEventListener('click', (event) => {
+    if (isSpectator) {
+      return;
+    }
+
     const target = event.target as HTMLElement | null;
     if (!target) {
       return;
@@ -340,6 +423,37 @@ function wireTouchControls(): void {
       send({ type: 'input', awaken: true });
     }
   });
+
+  updateTouchControlsVisibility();
+}
+
+function updateTouchControlsVisibility(): void {
+  const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  if (!isTouch || isSpectator) {
+    touchControls.classList.add('hidden');
+  } else {
+    touchControls.classList.remove('hidden');
+  }
+}
+
+function cycleSpectatorTarget(): void {
+  if (!snapshot) {
+    return;
+  }
+
+  const alive = snapshot.players.filter((player) => player.state !== 'down');
+  if (alive.length === 0) {
+    return;
+  }
+
+  if (!followPlayerId) {
+    followPlayerId = alive[0]?.id ?? null;
+    return;
+  }
+
+  const idx = alive.findIndex((player) => player.id === followPlayerId);
+  const next = alive[(idx + 1) % alive.length];
+  followPlayerId = next?.id ?? followPlayerId;
 }
 
 function updateHud(): void {
@@ -352,6 +466,15 @@ function updateHud(): void {
   const downCount = snapshot.players.filter((player) => player.state === 'down').length;
   const ghosts = snapshot.ghosts.length;
   const fruits = snapshot.fruits.length;
+  const modeText = isSpectator ? '観戦' : 'プレイ';
+
+  const meLine = isSpectator
+    ? `<p>mode: ${modeText} | follow: ${escapeHtml(currentFollowName(snapshot.players))}</p>`
+    : me
+      ? `<p>自分: ${escapeHtml(me.name)} | score ${me.score}</p>
+         <p>状態: ${me.state} | 覚醒 ${'★'.repeat(me.stocks)}${'☆'.repeat(Math.max(0, 3 - me.stocks))}</p>
+         <p>ゲージ: ${me.gauge}/${me.gaugeMax}</p>`
+      : '<p>自分の情報なし</p>';
 
   hud.innerHTML = `
     <div class="panel small">
@@ -360,17 +483,19 @@ function updateHud(): void {
       <p>残り時間: ${formatMs(snapshot.timeLeftMs)}</p>
       <p>ゴースト: ${ghosts} / フルーツ: ${fruits}</p>
       <p>ダウン: ${downCount}</p>
-      ${
-        me
-          ? `<p>自分: ${escapeHtml(me.name)} | score ${me.score}</p>
-      <p>状態: ${me.state} | 覚醒 ${'★'.repeat(me.stocks)}${'☆'.repeat(Math.max(0, 3 - me.stocks))}</p>
-      <p>ゲージ: ${me.gauge}/${me.gaugeMax}</p>`
-          : '<p>自分の情報なし</p>'
-      }
+      ${meLine}
       <h4>イベント</h4>
       <ul>${logs.slice(-8).map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>
     </div>
   `;
+}
+
+function currentFollowName(players: PlayerView[]): string {
+  if (!followPlayerId) {
+    return 'auto';
+  }
+  const found = players.find((player) => player.id === followPlayerId);
+  return found?.name ?? 'auto';
 }
 
 function renderFrame(): void {
@@ -388,9 +513,9 @@ function draw(): void {
     return;
   }
 
-  const me = snapshot.players.find((player) => player.id === meId);
-  const centerX = me ? me.x + 0.5 : world.width / 2;
-  const centerY = me ? me.y + 0.5 : world.height / 2;
+  const camera = resolveCameraCenter(world, snapshot);
+  const centerX = camera.x;
+  const centerY = camera.y;
 
   const tileSize = Math.max(12, Math.min(30, Math.floor(Math.min(canvas.width, canvas.height) / 26)));
   const originX = Math.floor(canvas.width / 2 - centerX * tileSize);
@@ -404,7 +529,7 @@ function draw(): void {
   const maxY = Math.min(world.height - 1, Math.ceil(centerY + visibleRows / 2));
 
   for (let y = minY; y <= maxY; y += 1) {
-    const row = world.tiles[y];
+    const row = world.tiles[y] as string;
     for (let x = minX; x <= maxX; x += 1) {
       const sx = originX + x * tileSize;
       const sy = originY + y * tileSize;
@@ -433,7 +558,6 @@ function draw(): void {
     }
   }
 
-  // dots
   ctx.fillStyle = '#ffd66a';
   for (const key of dotSet) {
     const [x, y] = key.split(',').map(Number);
@@ -449,7 +573,6 @@ function draw(): void {
     circle(sx, sy, Math.max(1.5, tileSize * 0.1), '#ffd66a');
   }
 
-  // power pellets
   for (const pellet of pelletMap.values()) {
     if (!pellet.active) {
       continue;
@@ -470,6 +593,32 @@ function draw(): void {
   drawFruits(snapshot.fruits, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY);
   drawGhosts(snapshot.ghosts, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY);
   drawPlayers(snapshot.players, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY);
+}
+
+function resolveCameraCenter(worldState: WorldInit, state: Snapshot): { x: number; y: number } {
+  if (!isSpectator) {
+    const me = state.players.find((player) => player.id === meId);
+    if (me) {
+      return { x: me.x + 0.5, y: me.y + 0.5 };
+    }
+  }
+
+  const alivePlayers = state.players.filter((player) => player.state !== 'down');
+  if (alivePlayers.length === 0) {
+    return { x: worldState.width / 2, y: worldState.height / 2 };
+  }
+
+  let follow = followPlayerId ? alivePlayers.find((player) => player.id === followPlayerId) : undefined;
+  if (!follow) {
+    follow = [...alivePlayers].sort((a, b) => b.score - a.score)[0];
+    followPlayerId = follow?.id ?? null;
+  }
+
+  if (!follow) {
+    return { x: worldState.width / 2, y: worldState.height / 2 };
+  }
+
+  return { x: follow.x + 0.5, y: follow.y + 0.5 };
 }
 
 function drawGates(
@@ -753,4 +902,12 @@ function escapeHtml(value: string): string {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+function normalizeNumber(input: string | null, fallback: number, min: number, max: number): number {
+  const n = Number(input ?? '');
+  if (!Number.isFinite(n)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.floor(n)));
 }

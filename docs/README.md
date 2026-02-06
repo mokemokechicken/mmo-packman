@@ -11,6 +11,7 @@
 ## 実装詳細
 
 - [サーバー/クライアント通信プロトコル](./server_protocol.md)
+- [AI-only テストプレイ手順](./ai_test_play.md)
 - [Cloud Run デプロイ手順](./deployment_cloud_run.md)
 - [運用メモ / バランス調整観点](./operation_notes.md)
 

@@ -16,6 +16,7 @@ export interface LobbyPlayer {
   name: string;
   connected: boolean;
   ai: boolean;
+  spectator: boolean;
   isHost: boolean;
 }
 
@@ -155,8 +156,8 @@ export interface GameSummary {
 }
 
 export type ClientMessage =
-  | { type: 'hello'; name: string; reconnectToken?: string }
-  | { type: 'lobby_start'; difficulty?: Difficulty }
+  | { type: 'hello'; name: string; reconnectToken?: string; spectator?: boolean }
+  | { type: 'lobby_start'; difficulty?: Difficulty; aiPlayerCount?: number; timeLimitMinutes?: number }
   | { type: 'input'; dir?: Direction; awaken?: boolean }
   | { type: 'ping'; t: number };
 
@@ -166,6 +167,7 @@ export type ServerMessage =
       playerId: string;
       reconnectToken: string;
       isHost: boolean;
+      isSpectator: boolean;
     }
   | {
       type: 'lobby';
@@ -173,6 +175,7 @@ export type ServerMessage =
       hostId: string | null;
       canStart: boolean;
       running: boolean;
+      spectatorCount: number;
       note?: string;
     }
   | {
@@ -181,6 +184,7 @@ export type ServerMessage =
       world: WorldInit;
       config: GameConfig;
       startedAtMs: number;
+      isSpectator: boolean;
     }
   | {
       type: 'state';

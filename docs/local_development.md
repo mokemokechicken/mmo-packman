@@ -45,12 +45,38 @@ npm run start
 npm run check
 ```
 
+## AI-onlyテストプレイ（UI）
+
+1. ブラウザで `http://localhost:5173` を開く
+2. 参加モードを `観戦` にする
+3. `AIプレイヤー数` を設定（例: `2`, `5`）
+4. `テスト時間` を設定（`1〜10`分）
+5. Host で `テスト開始`
+
+## AI-onlyテストプレイ（CLI）
+
+```bash
+npm run simulate
+```
+
+デフォルト実行:
+
+- `quick-check-ai2` (2分)
+- `balance-check-ai5` (5分)
+
+カスタム実行例:
+
+```bash
+npm run simulate -- --single --ai 5 --minutes 10 --difficulty normal
+```
+
 ## 操作方法
+
+プレイヤーモード:
 
 - `Arrow` or `WASD`: 移動
 - `Space` / `E` / `Enter`: 覚醒
 
-## 複数人で試す
+観戦モード:
 
-- ブラウザタブを2つ以上開く
-- 1人目（Host）が `ゲーム開始`
+- `Tab`: 追従対象の切り替え

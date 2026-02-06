@@ -10,8 +10,11 @@
 - `hello`
   - `name`: 表示名
   - `reconnectToken?`: 再接続トークン
+  - `spectator?`: `true` で観戦参加
 - `lobby_start`
   - `difficulty?`: `casual | normal | hard | nightmare`
+  - `aiPlayerCount?`: AIプレイヤー人数
+  - `timeLimitMinutes?`: テスト時間（1〜10分）
 - `input`
   - `dir?`: `up/down/left/right`
   - `awaken?`: `true` で覚醒発動要求
@@ -24,13 +27,17 @@
   - `playerId`
   - `reconnectToken`
   - `isHost`
+  - `isSpectator`
 - `lobby`
-  - プレイヤー一覧
+  - メンバー一覧（`spectator` フラグ付き）
   - `hostId`
+  - `canStart`
   - `running`
+  - `spectatorCount`
 - `game_init`
   - ワールド初期情報（壁、ドット、パワーエサ、セクター、ゲート）
   - ゲーム設定
+  - `isSpectator`
 - `state`
   - 20Hz スナップショット
   - プレイヤー / ゴースト / フルーツ / セクター / ゲート
@@ -47,8 +54,8 @@
 ## 再接続仕様
 
 - クライアントは `welcome.reconnectToken` を保存
-- 切断後に `hello` で同トークンを送ると同一プレイヤーに復帰
-- ゲーム進行中にトークン無しの新規参加は拒否
+- 切断後に `hello` で同トークンを送ると同一メンバーに復帰
+- 試合中の新規プレイヤー参加は不可（観戦参加は可）
 
 ## 注意点
 

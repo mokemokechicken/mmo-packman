@@ -39,7 +39,6 @@ import { clamp, keyOf, makeId, manhattan } from './helpers.js';
 import { Rng } from './rng.js';
 import {
   type GeneratedWorld,
-  type PowerPelletInternal,
   generateWorld,
   toWorldInit,
 } from './world.js';
@@ -62,6 +61,7 @@ interface PlayerInternal extends PlayerView {
   nextAuraMultiplier: number;
   remoteReviveGraceUntil: number;
   aiThinkAt: number;
+  holdUntilMs: number;
   stats: PlayerStats;
 }
 
@@ -76,6 +76,10 @@ export interface StartPlayer {
   name: string;
   reconnectToken: string;
   connected: boolean;
+}
+
+export interface GameEngineOptions {
+  timeLimitMsOverride?: number;
 }
 
 export class GameEngine {
@@ -101,7 +105,12 @@ export class GameEngine {
   private maxCaptureRatio = 0;
   private milestoneEmitted = new Set<number>();
 
-  public constructor(startPlayers: StartPlayer[], difficulty: Difficulty = 'normal', seed = Date.now()) {
+  public constructor(
+    startPlayers: StartPlayer[],
+    difficulty: Difficulty = 'normal',
+    seed = Date.now(),
+    options: GameEngineOptions = {},
+  ) {
     this.rng = new Rng(seed);
     this.playerCount = startPlayers.length;
     this.startedAtMs = Date.now();
@@ -115,7 +124,7 @@ export class GameEngine {
       powerDurationMs: POWER_DURATION_MS,
       awakenDurationMs: AWAKEN_DURATION_MS,
       rescueTimeoutMs: RESCUE_TIMEOUT_MS,
-      timeLimitMs: getTimeLimitMs(this.playerCount),
+      timeLimitMs: options.timeLimitMsOverride ?? getTimeLimitMs(this.playerCount),
       difficulty,
     };
 
@@ -151,6 +160,7 @@ export class GameEngine {
         nextAuraMultiplier: 1,
         remoteReviveGraceUntil: 0,
         aiThinkAt: 0,
+        holdUntilMs: 0,
         stats: {
           dots: 0,
           ghosts: 0,
@@ -461,12 +471,28 @@ export class GameEngine {
       return;
     }
 
-    player.aiThinkAt = nowMs + 250;
+    player.aiThinkAt = nowMs + 180;
 
     const directions = this.availableDirections(player.x, player.y, player.dir);
     if (directions.length === 0) {
       return;
     }
+
+    if (this.shouldAiAwaken(player)) {
+      player.awakenRequested = true;
+    }
+
+    if (player.holdUntilMs > nowMs) {
+      player.desiredDir = 'none';
+      return;
+    }
+
+    if (this.holdGateSwitchIfNeeded(player, nowMs)) {
+      return;
+    }
+
+    const aiContext = this.buildAiContext();
+    const strategicDir = this.chooseStrategicAiDirection(player, aiContext);
 
     let bestDir = directions[0] as MoveDirection;
     let bestScore = Number.NEGATIVE_INFINITY;
@@ -475,41 +501,7 @@ export class GameEngine {
       const vec = DIRECTION_VECTORS[dir];
       const nx = player.x + vec.x;
       const ny = player.y + vec.y;
-      const key = keyOf(nx, ny);
-
-      let score = 0;
-      if (this.world.dots.has(key)) {
-        score += 8;
-      }
-
-      const pellet = this.world.powerPellets.get(key);
-      if (pellet?.active) {
-        score += 10;
-      }
-
-      let nearestGhost = Number.POSITIVE_INFINITY;
-      for (const ghost of this.ghosts.values()) {
-        const dist = manhattan(nx, ny, ghost.x, ghost.y);
-        nearestGhost = Math.min(nearestGhost, dist);
-      }
-
-      if (nearestGhost <= 1) {
-        score -= 100;
-      } else if (nearestGhost <= 2) {
-        score -= 25;
-      }
-
-      for (const teammate of this.players.values()) {
-        if (teammate.state === 'down') {
-          const dist = manhattan(nx, ny, teammate.x, teammate.y);
-          if (dist === 0) {
-            score += 16;
-          } else if (dist <= 2) {
-            score += 4;
-          }
-        }
-      }
-
+      const score = this.scoreAiCandidate(player, nx, ny, dir, strategicDir, aiContext);
       if (score > bestScore) {
         bestScore = score;
         bestDir = dir;
@@ -517,6 +509,405 @@ export class GameEngine {
     }
 
     player.desiredDir = bestDir;
+  }
+
+  private buildAiContext(): { downCells: Set<string>; fruitCells: Set<string> } {
+    const downCells = new Set<string>();
+    const fruitCells = new Set<string>();
+
+    for (const teammate of this.players.values()) {
+      if (teammate.state === 'down') {
+        downCells.add(keyOf(teammate.x, teammate.y));
+      }
+    }
+
+    for (const fruit of this.fruits.values()) {
+      fruitCells.add(keyOf(fruit.x, fruit.y));
+    }
+
+    return { downCells, fruitCells };
+  }
+
+  private shouldAiAwaken(player: PlayerInternal): boolean {
+    if (player.state === 'down' || player.state === 'power' || player.stocks <= 0) {
+      return false;
+    }
+
+    const nearGhost = this.distanceToNearestGhost(player.x, player.y);
+    if (nearGhost !== null && nearGhost <= 2) {
+      return true;
+    }
+
+    const bossDist = this.distanceToNearestGhostType(player.x, player.y, 'boss');
+    if (bossDist !== null && bossDist <= 4) {
+      return true;
+    }
+
+    if (this.captureRatio() >= 0.88 && player.stocks >= 2 && nearGhost !== null && nearGhost <= 4) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private holdGateSwitchIfNeeded(player: PlayerInternal, nowMs: number): boolean {
+    for (const gate of this.world.gates) {
+      if (gate.open) {
+        continue;
+      }
+
+      const onA = player.x === gate.switchA.x && player.y === gate.switchA.y;
+      const onB = player.x === gate.switchB.x && player.y === gate.switchB.y;
+      if (!onA && !onB) {
+        continue;
+      }
+
+      const otherSwitch = onA ? gate.switchB : gate.switchA;
+      const otherPressed = this.hasStandingPlayer(otherSwitch.x, otherSwitch.y);
+      if (otherPressed) {
+        continue;
+      }
+
+      const helperNearby = Array.from(this.players.values()).some((teammate) => {
+        if (teammate.id === player.id || teammate.state === 'down') {
+          return false;
+        }
+        return manhattan(teammate.x, teammate.y, otherSwitch.x, otherSwitch.y) <= 12;
+      });
+
+      if (helperNearby) {
+        player.holdUntilMs = nowMs + 800;
+        player.desiredDir = 'none';
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private chooseStrategicAiDirection(
+    player: PlayerInternal,
+    aiContext: { downCells: Set<string>; fruitCells: Set<string> },
+  ): MoveDirection | null {
+    const rescueDir = this.findDirectionToPredicate(player.x, player.y, 24, (x, y) =>
+      aiContext.downCells.has(keyOf(x, y)),
+    );
+    if (rescueDir) {
+      return rescueDir;
+    }
+
+    if (player.state === 'power') {
+      const ghostDir = this.findDirectionToPredicate(player.x, player.y, 18, (x, y) => this.hasGhostAt(x, y));
+      if (ghostDir) {
+        return ghostDir;
+      }
+    }
+
+    const nearGhost = this.distanceToNearestGhost(player.x, player.y);
+    if (player.state !== 'power' && nearGhost !== null && nearGhost <= 3) {
+      const pelletDir = this.findDirectionToPredicate(player.x, player.y, 22, (x, y) => {
+        const pellet = this.world.powerPellets.get(keyOf(x, y));
+        return !!pellet?.active;
+      });
+      if (pelletDir) {
+        return pelletDir;
+      }
+
+      const escapeDir = this.pickSafestDirection(player);
+      if (escapeDir) {
+        return escapeDir;
+      }
+    }
+
+    const gateAssist = this.findGateAssistDirection(player);
+    if (gateAssist) {
+      return gateAssist;
+    }
+
+    const defenseDir = this.findDirectionToPredicate(player.x, player.y, 26, (x, y) => {
+      const sector = this.getSectorAt(x, y);
+      if (!sector || !sector.captured) {
+        return false;
+      }
+      const threshold = Math.max(1, Math.floor(sector.totalDots * 0.03));
+      return sector.dotCount > threshold;
+    });
+    if (defenseDir) {
+      return defenseDir;
+    }
+
+    const exploreDir = this.findDirectionToPredicate(player.x, player.y, 28, (x, y) => {
+      const sector = this.getSectorAt(x, y);
+      return !!sector && !sector.discovered;
+    });
+    if (exploreDir) {
+      return exploreDir;
+    }
+
+    const fruitDir = this.findDirectionToPredicate(player.x, player.y, 20, (x, y) =>
+      aiContext.fruitCells.has(keyOf(x, y)),
+    );
+    if (fruitDir) {
+      return fruitDir;
+    }
+
+    return this.findDirectionToPredicate(player.x, player.y, 32, (x, y) => this.world.dots.has(keyOf(x, y)));
+  }
+
+  private scoreAiCandidate(
+    player: PlayerInternal,
+    x: number,
+    y: number,
+    dir: MoveDirection,
+    strategicDir: MoveDirection | null,
+    aiContext: { downCells: Set<string>; fruitCells: Set<string> },
+  ): number {
+    let score = 0;
+    const key = keyOf(x, y);
+
+    if (this.world.dots.has(key)) {
+      score += 12;
+      const sector = this.getSectorAt(x, y);
+      if (sector && !sector.captured) {
+        score += 4;
+      }
+    }
+
+    const pellet = this.world.powerPellets.get(key);
+    if (pellet?.active) {
+      score += 24;
+    }
+
+    if (aiContext.fruitCells.has(key)) {
+      score += 14;
+    }
+
+    if (aiContext.downCells.has(key)) {
+      score += 45;
+    }
+
+    const sector = this.getSectorAt(x, y);
+    if (sector) {
+      if (!sector.discovered) {
+        score += 10;
+      }
+      if (sector.captured && sector.dotCount > 0) {
+        score += 6;
+      }
+      if (sector.type === 'dark' && player.state !== 'power') {
+        score -= 2;
+      }
+      if (sector.type === 'fast') {
+        score += 1;
+      }
+    }
+
+    const nearGhost = this.distanceToNearestGhost(x, y);
+    if (nearGhost !== null) {
+      if (player.state === 'power') {
+        if (nearGhost <= 1) {
+          score += 22;
+        } else if (nearGhost <= 3) {
+          score += 10;
+        } else {
+          score -= 1;
+        }
+      } else {
+        if (nearGhost <= 1) {
+          score -= 180;
+        } else if (nearGhost <= 2) {
+          score -= 70;
+        } else if (nearGhost <= 3) {
+          score -= 25;
+        } else {
+          score += Math.min(5, nearGhost * 0.6);
+        }
+      }
+    }
+
+    if (strategicDir) {
+      score += strategicDir === dir ? 16 : -2;
+    }
+    if (dir === player.dir) {
+      score += 1.5;
+    }
+    if (this.isOccupiedByOtherStandingPlayer(x, y, player.id)) {
+      score -= 6;
+    }
+
+    return score;
+  }
+
+  private pickSafestDirection(player: PlayerInternal): MoveDirection | null {
+    const directions = this.availableDirections(player.x, player.y, player.dir);
+    if (directions.length === 0) {
+      return null;
+    }
+
+    let bestDir = directions[0] as MoveDirection;
+    let bestSafety = Number.NEGATIVE_INFINITY;
+
+    for (const dir of directions) {
+      const vec = DIRECTION_VECTORS[dir];
+      const nx = player.x + vec.x;
+      const ny = player.y + vec.y;
+      const dist = this.distanceToNearestGhost(nx, ny) ?? 99;
+      if (dist > bestSafety) {
+        bestSafety = dist;
+        bestDir = dir;
+      }
+    }
+
+    return bestDir;
+  }
+
+  private findGateAssistDirection(player: PlayerInternal): MoveDirection | null {
+    let best: { dir: MoveDirection; dist: number } | null = null;
+
+    for (const gate of this.world.gates) {
+      if (gate.open) {
+        continue;
+      }
+
+      const aPressed = this.hasStandingPlayer(gate.switchA.x, gate.switchA.y);
+      const bPressed = this.hasStandingPlayer(gate.switchB.x, gate.switchB.y);
+      let target: Vec2 | null = null;
+
+      if (aPressed && !bPressed) {
+        target = gate.switchB;
+      } else if (bPressed && !aPressed) {
+        target = gate.switchA;
+      } else if (!aPressed && !bPressed) {
+        const gateDist = Math.min(
+          manhattan(player.x, player.y, gate.a.x, gate.a.y),
+          manhattan(player.x, player.y, gate.b.x, gate.b.y),
+        );
+        if (gateDist <= 8) {
+          const distA = manhattan(player.x, player.y, gate.switchA.x, gate.switchA.y);
+          const distB = manhattan(player.x, player.y, gate.switchB.x, gate.switchB.y);
+          target = distA <= distB ? gate.switchA : gate.switchB;
+        }
+      }
+
+      if (!target) {
+        continue;
+      }
+      if (player.x === target.x && player.y === target.y) {
+        continue;
+      }
+
+      const dir = this.findDirectionToPredicate(
+        player.x,
+        player.y,
+        22,
+        (x, y) => x === target!.x && y === target!.y,
+      );
+      if (!dir) {
+        continue;
+      }
+
+      const dist = manhattan(player.x, player.y, target.x, target.y);
+      if (!best || dist < best.dist) {
+        best = { dir, dist };
+      }
+    }
+
+    return best?.dir ?? null;
+  }
+
+  private findDirectionToPredicate(
+    startX: number,
+    startY: number,
+    maxDepth: number,
+    predicate: (x: number, y: number) => boolean,
+  ): MoveDirection | null {
+    type Node = { x: number; y: number; depth: number; firstDir: MoveDirection | null };
+    const queue: Node[] = [{ x: startX, y: startY, depth: 0, firstDir: null }];
+    const visited = new Set<string>([keyOf(startX, startY)]);
+
+    for (let index = 0; index < queue.length; index += 1) {
+      const node = queue[index] as Node;
+      if (node.depth > 0 && predicate(node.x, node.y)) {
+        return node.firstDir;
+      }
+
+      if (node.depth >= maxDepth) {
+        continue;
+      }
+
+      for (const dir of this.shuffledMoveDirections()) {
+        if (!this.canMove(node.x, node.y, dir)) {
+          continue;
+        }
+        const vec = DIRECTION_VECTORS[dir];
+        const nx = node.x + vec.x;
+        const ny = node.y + vec.y;
+        const key = keyOf(nx, ny);
+        if (visited.has(key)) {
+          continue;
+        }
+        visited.add(key);
+        queue.push({
+          x: nx,
+          y: ny,
+          depth: node.depth + 1,
+          firstDir: node.firstDir ?? dir,
+        });
+      }
+    }
+
+    return null;
+  }
+
+  private shuffledMoveDirections(): MoveDirection[] {
+    const directions: MoveDirection[] = ['up', 'down', 'left', 'right'];
+    for (let i = directions.length - 1; i > 0; i -= 1) {
+      const j = this.rng.int(0, i);
+      const tmp = directions[i] as MoveDirection;
+      directions[i] = directions[j] as MoveDirection;
+      directions[j] = tmp;
+    }
+    return directions;
+  }
+
+  private distanceToNearestGhost(x: number, y: number): number | null {
+    let nearest = Number.POSITIVE_INFINITY;
+    for (const ghost of this.ghosts.values()) {
+      nearest = Math.min(nearest, manhattan(x, y, ghost.x, ghost.y));
+    }
+    return Number.isFinite(nearest) ? nearest : null;
+  }
+
+  private distanceToNearestGhostType(x: number, y: number, type: GhostType): number | null {
+    let nearest = Number.POSITIVE_INFINITY;
+    for (const ghost of this.ghosts.values()) {
+      if (ghost.type !== type) {
+        continue;
+      }
+      nearest = Math.min(nearest, manhattan(x, y, ghost.x, ghost.y));
+    }
+    return Number.isFinite(nearest) ? nearest : null;
+  }
+
+  private hasGhostAt(x: number, y: number): boolean {
+    for (const ghost of this.ghosts.values()) {
+      if (ghost.x === x && ghost.y === y) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private isOccupiedByOtherStandingPlayer(x: number, y: number, playerId: string): boolean {
+    for (const player of this.players.values()) {
+      if (player.id === playerId || player.state === 'down') {
+        continue;
+      }
+      if (player.x === x && player.y === y) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private tryAwaken(player: PlayerInternal, nowMs: number): void {
