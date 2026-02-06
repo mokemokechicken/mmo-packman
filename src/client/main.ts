@@ -74,6 +74,7 @@ function connect(): void {
   ws = new WebSocket(url);
 
   ws.addEventListener('open', () => {
+    currentDir = 'none';
     sendHello();
   });
 
@@ -85,7 +86,13 @@ function connect(): void {
     handleServerMessage(msg);
   });
 
-  ws.addEventListener('close', () => {
+  ws.addEventListener('close', (event) => {
+    currentDir = 'none';
+    if (event.code === 4001) {
+      pushLog('このタブの接続は他の接続に置き換えられました');
+      return;
+    }
+
     if (reconnectTimer) {
       window.clearTimeout(reconnectTimer);
     }
@@ -148,6 +155,7 @@ function handleServerMessage(message: ServerMessage): void {
     meId = message.meId;
     world = message.world;
     config = message.config;
+    currentDir = 'none';
     isSpectator = message.isSpectator;
     summary = null;
     logs = [];

@@ -43,11 +43,15 @@ if (fs.existsSync(distClientDir)) {
 
 const clients = new Map<string, ClientContext>();
 const lobbyPlayers = new Map<string, LobbyPlayerInternal>();
+const activeClientByPlayerId = new Map<string, string>();
 
 let hostId: string | null = null;
 let game: GameEngine | null = null;
 let loop: NodeJS.Timeout | null = null;
 let runningAiCount = 0;
+
+const DIFFICULTIES = new Set<Difficulty>(['casual', 'normal', 'hard', 'nightmare']);
+const MOVE_DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
 
 wss.on('connection', (ws) => {
   const clientId = randomUUID();
@@ -94,11 +98,17 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     clients.delete(clientId);
-    if (!ctx.playerId) {
+    const boundPlayerId = ctx.playerId;
+    if (!boundPlayerId) {
       return;
     }
 
-    const member = lobbyPlayers.get(ctx.playerId);
+    if (activeClientByPlayerId.get(boundPlayerId) !== ctx.id) {
+      return;
+    }
+    activeClientByPlayerId.delete(boundPlayerId);
+
+    const member = lobbyPlayers.get(boundPlayerId);
     if (!member) {
       return;
     }
@@ -106,6 +116,7 @@ wss.on('connection', (ws) => {
     if (game) {
       if (member.spectator) {
         lobbyPlayers.delete(member.id);
+        activeClientByPlayerId.delete(member.id);
       } else {
         member.connected = false;
         member.ai = true;
@@ -113,6 +124,7 @@ wss.on('connection', (ws) => {
       }
     } else {
       lobbyPlayers.delete(member.id);
+      activeClientByPlayerId.delete(member.id);
     }
 
     if (hostId === member.id) {
@@ -129,15 +141,42 @@ server.listen(PORT, () => {
 
 function handleHello(ctx: ClientContext, requestedName: string, spectatorRequested: boolean, reconnectToken?: string): void {
   const name = sanitizeName(requestedName);
-  const existing = reconnectToken ? findPlayerByToken(reconnectToken) : null;
+  if (ctx.playerId) {
+    const current = lobbyPlayers.get(ctx.playerId);
+    if (current) {
+      if (reconnectToken && reconnectToken !== current.reconnectToken) {
+        send(ctx.ws, { type: 'error', message: 'reconnect token mismatch for this connection' });
+        return;
+      }
 
+      if (!game) {
+        current.spectator = spectatorRequested;
+      }
+      current.name = name;
+      current.connected = true;
+      current.ai = false;
+
+      bindClientToPlayer(ctx, current);
+      if (game && !current.spectator && game.hasPlayer(current.id)) {
+        game.setPlayerConnection(current.id, true);
+      }
+      ensureHostAssigned(current.id);
+
+      sendWelcomeAndInitialState(ctx, current);
+      broadcastLobby();
+      return;
+    }
+
+    ctx.playerId = null;
+  }
+
+  const existing = reconnectToken ? findPlayerByToken(reconnectToken) : null;
   if (existing) {
     if (game && !existing.spectator && !game.hasPlayer(existing.id)) {
       send(ctx.ws, { type: 'error', message: 'game already running; reconnection only' });
       return;
     }
 
-    // 試合中はロール変更不可。ロビー中のみプレイヤー/観戦を切り替えられる。
     if (!game) {
       existing.spectator = spectatorRequested;
     }
@@ -145,36 +184,14 @@ function handleHello(ctx: ClientContext, requestedName: string, spectatorRequest
     existing.name = name;
     existing.connected = true;
     existing.ai = false;
-    ctx.playerId = existing.id;
 
-    if (game && !existing.spectator) {
+    bindClientToPlayer(ctx, existing);
+    if (game && !existing.spectator && game.hasPlayer(existing.id)) {
       game.setPlayerConnection(existing.id, true);
     }
+    ensureHostAssigned(existing.id);
 
-    send(ctx.ws, {
-      type: 'welcome',
-      playerId: existing.id,
-      reconnectToken: existing.reconnectToken,
-      isHost: hostId === existing.id,
-      isSpectator: existing.spectator,
-    });
-
-    if (game) {
-      send(ctx.ws, {
-        type: 'game_init',
-        meId: existing.id,
-        world: game.getWorldInit(),
-        config: game.config,
-        startedAtMs: game.startedAtMs,
-        isSpectator: existing.spectator,
-      });
-
-      send(ctx.ws, {
-        type: 'state',
-        snapshot: game.buildSnapshot(false),
-      });
-    }
-
+    sendWelcomeAndInitialState(ctx, existing);
     broadcastLobby();
     return;
   }
@@ -197,12 +214,14 @@ function handleHello(ctx: ClientContext, requestedName: string, spectatorRequest
   };
 
   lobbyPlayers.set(member.id, member);
-  ctx.playerId = member.id;
+  bindClientToPlayer(ctx, member);
+  ensureHostAssigned(member.id);
+  sendWelcomeAndInitialState(ctx, member);
 
-  if (!hostId) {
-    hostId = member.id;
-  }
+  broadcastLobby();
+}
 
+function sendWelcomeAndInitialState(ctx: ClientContext, member: LobbyPlayerInternal): void {
   send(ctx.ws, {
     type: 'welcome',
     playerId: member.id,
@@ -211,23 +230,23 @@ function handleHello(ctx: ClientContext, requestedName: string, spectatorRequest
     isSpectator: member.spectator,
   });
 
-  if (game) {
-    send(ctx.ws, {
-      type: 'game_init',
-      meId: member.id,
-      world: game.getWorldInit(),
-      config: game.config,
-      startedAtMs: game.startedAtMs,
-      isSpectator: member.spectator,
-    });
-
-    send(ctx.ws, {
-      type: 'state',
-      snapshot: game.buildSnapshot(false),
-    });
+  if (!game) {
+    return;
   }
 
-  broadcastLobby();
+  send(ctx.ws, {
+    type: 'game_init',
+    meId: member.id,
+    world: game.getWorldInit(),
+    config: game.config,
+    startedAtMs: game.startedAtMs,
+    isSpectator: member.spectator,
+  });
+
+  send(ctx.ws, {
+    type: 'state',
+    snapshot: game.buildSnapshot(false),
+  });
 }
 
 function handleLobbyStart(
@@ -239,6 +258,7 @@ function handleLobbyStart(
   if (game) {
     return;
   }
+  ensureHostAssigned();
 
   if (requestedBy !== hostId) {
     const target = getClientByPlayerId(requestedBy);
@@ -343,9 +363,7 @@ function handleLobbyStart(
         player.ai = false;
       }
 
-      if (hostId && !lobbyPlayers.get(hostId)?.connected) {
-        hostId = chooseNextHost();
-      }
+      ensureHostAssigned();
 
       broadcastLobby('ゲーム終了。再スタート可能です');
     }
@@ -353,6 +371,7 @@ function handleLobbyStart(
 }
 
 function broadcastLobby(note?: string): void {
+  ensureHostAssigned();
   const ordered = Array.from(lobbyPlayers.values())
     .sort((a, b) => a.name.localeCompare(b.name, 'ja'))
     .map((player) => ({
@@ -382,6 +401,9 @@ function broadcastLobby(note?: string): void {
 function broadcast(message: ServerMessage): void {
   const payload = JSON.stringify(message);
   for (const ctx of clients.values()) {
+    if (!canReceiveBroadcast(ctx)) {
+      continue;
+    }
     if (ctx.ws.readyState === ctx.ws.OPEN) {
       ctx.ws.send(payload);
     }
@@ -397,11 +419,97 @@ function send(ws: WebSocket, message: ServerMessage): void {
 
 function parseMessage(raw: string): ClientMessage | null {
   try {
-    const value = JSON.parse(raw) as ClientMessage;
-    if (!value || typeof value !== 'object' || !('type' in value)) {
+    const value = JSON.parse(raw) as unknown;
+    if (!isRecord(value) || typeof value.type !== 'string') {
       return null;
     }
-    return value;
+
+    if (value.type === 'hello') {
+      if (typeof value.name !== 'string') {
+        return null;
+      }
+
+      const reconnectToken =
+        value.reconnectToken === undefined
+          ? undefined
+          : typeof value.reconnectToken === 'string'
+            ? value.reconnectToken
+            : null;
+      const spectator =
+        value.spectator === undefined ? undefined : typeof value.spectator === 'boolean' ? value.spectator : null;
+
+      if (reconnectToken === null || spectator === null) {
+        return null;
+      }
+      return {
+        type: 'hello',
+        name: value.name,
+        reconnectToken,
+        spectator,
+      };
+    }
+
+    if (value.type === 'lobby_start') {
+      const difficulty =
+        value.difficulty === undefined
+          ? undefined
+          : typeof value.difficulty === 'string' && DIFFICULTIES.has(value.difficulty as Difficulty)
+            ? (value.difficulty as Difficulty)
+            : null;
+      const aiPlayerCount =
+        value.aiPlayerCount === undefined
+          ? undefined
+          : typeof value.aiPlayerCount === 'number' && Number.isFinite(value.aiPlayerCount)
+            ? value.aiPlayerCount
+            : null;
+      const timeLimitMinutes =
+        value.timeLimitMinutes === undefined
+          ? undefined
+          : typeof value.timeLimitMinutes === 'number' && Number.isFinite(value.timeLimitMinutes)
+            ? value.timeLimitMinutes
+            : null;
+
+      if (difficulty === null || aiPlayerCount === null || timeLimitMinutes === null) {
+        return null;
+      }
+      return {
+        type: 'lobby_start',
+        difficulty,
+        aiPlayerCount,
+        timeLimitMinutes,
+      };
+    }
+
+    if (value.type === 'input') {
+      const dir =
+        value.dir === undefined
+          ? undefined
+          : typeof value.dir === 'string' && MOVE_DIRECTIONS.has(value.dir)
+            ? (value.dir as 'up' | 'down' | 'left' | 'right')
+            : null;
+      const awaken = value.awaken === undefined ? undefined : typeof value.awaken === 'boolean' ? value.awaken : null;
+
+      if (dir === null || awaken === null) {
+        return null;
+      }
+      return {
+        type: 'input',
+        dir: dir as 'up' | 'down' | 'left' | 'right' | undefined,
+        awaken,
+      };
+    }
+
+    if (value.type === 'ping') {
+      if (typeof value.t !== 'number' || !Number.isFinite(value.t)) {
+        return null;
+      }
+      return {
+        type: 'ping',
+        t: value.t,
+      };
+    }
+
+    return null;
   } catch {
     return null;
   }
@@ -421,7 +529,24 @@ function chooseNextHost(): string | null {
       return player.id;
     }
   }
-  return lobbyPlayers.values().next().value?.id ?? null;
+  return null;
+}
+
+function ensureHostAssigned(preferredPlayerId?: string): void {
+  const currentHost = hostId ? lobbyPlayers.get(hostId) : null;
+  if (currentHost?.connected) {
+    return;
+  }
+
+  if (preferredPlayerId) {
+    const preferred = lobbyPlayers.get(preferredPlayerId);
+    if (preferred?.connected) {
+      hostId = preferred.id;
+      return;
+    }
+  }
+
+  hostId = chooseNextHost();
 }
 
 function findPlayerByToken(token: string): LobbyPlayerInternal | null {
@@ -434,12 +559,11 @@ function findPlayerByToken(token: string): LobbyPlayerInternal | null {
 }
 
 function getClientByPlayerId(playerId: string): ClientContext | null {
-  for (const client of clients.values()) {
-    if (client.playerId === playerId) {
-      return client;
-    }
+  const clientId = activeClientByPlayerId.get(playerId);
+  if (!clientId) {
+    return null;
   }
-  return null;
+  return clients.get(clientId) ?? null;
 }
 
 function normalizeAiCount(value: number | undefined): number {
@@ -455,4 +579,37 @@ function normalizeTimeLimitMs(value: number | undefined): number | undefined {
   }
   const minutes = Math.max(1, Math.min(10, Math.floor(value)));
   return minutes * 60_000;
+}
+
+function bindClientToPlayer(ctx: ClientContext, member: LobbyPlayerInternal): void {
+  const oldClientId = activeClientByPlayerId.get(member.id);
+  if (oldClientId && oldClientId !== ctx.id) {
+    const oldClient = clients.get(oldClientId);
+    if (oldClient) {
+      oldClient.playerId = null;
+      if (oldClient.ws.readyState === oldClient.ws.OPEN) {
+        oldClient.ws.close(4001, 'superseded by new connection');
+      }
+    }
+  }
+
+  if (ctx.playerId && ctx.playerId !== member.id) {
+    activeClientByPlayerId.delete(ctx.playerId);
+  }
+  ctx.playerId = member.id;
+  activeClientByPlayerId.set(member.id, ctx.id);
+}
+
+function canReceiveBroadcast(ctx: ClientContext): boolean {
+  if (!ctx.playerId) {
+    return false;
+  }
+  if (activeClientByPlayerId.get(ctx.playerId) !== ctx.id) {
+    return false;
+  }
+  return lobbyPlayers.has(ctx.playerId);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object';
 }

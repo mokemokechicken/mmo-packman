@@ -101,6 +101,8 @@ export function generateWorld(playerCount: number, seed = Date.now()): Generated
       if (col < side - 1) {
         const conn = connectRight(grid, row, col, side, rng);
         if (conn && rng.bool(gateChance)) {
+          setFloor(grid, conn.switchA.x, conn.switchA.y);
+          setFloor(grid, conn.switchB.x, conn.switchB.y);
           gates.push({
             id: makeId('gate'),
             a: conn.a,
@@ -115,6 +117,8 @@ export function generateWorld(playerCount: number, seed = Date.now()): Generated
       if (row < side - 1) {
         const conn = connectDown(grid, row, col, side, rng);
         if (conn && rng.bool(gateChance)) {
+          setFloor(grid, conn.switchA.x, conn.switchA.y);
+          setFloor(grid, conn.switchB.x, conn.switchB.y);
           gates.push({
             id: makeId('gate'),
             a: conn.a,

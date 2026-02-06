@@ -158,7 +158,7 @@ export interface GameSummary {
 export type ClientMessage =
   | { type: 'hello'; name: string; reconnectToken?: string; spectator?: boolean }
   | { type: 'lobby_start'; difficulty?: Difficulty; aiPlayerCount?: number; timeLimitMinutes?: number }
-  | { type: 'input'; dir?: Direction; awaken?: boolean }
+  | { type: 'input'; dir?: Exclude<Direction, 'none'>; awaken?: boolean }
   | { type: 'ping'; t: number };
 
 export type ServerMessage =

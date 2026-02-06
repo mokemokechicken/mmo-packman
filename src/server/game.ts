@@ -51,6 +51,7 @@ interface PlayerStats {
 }
 
 type MoveDirection = Exclude<Direction, 'none'>;
+const AUTO_RESPAWN_GRACE_MS = 2_000;
 
 interface PlayerInternal extends PlayerView {
   desiredDir: Direction;
@@ -229,6 +230,9 @@ export class GameEngine {
     }
 
     if (input.dir) {
+      if (!isMoveDirection(input.dir)) {
+        return;
+      }
       player.desiredDir = input.dir;
     }
     if (input.awaken) {
@@ -244,13 +248,15 @@ export class GameEngine {
     this.tickCounter += 1;
     this.elapsedMs += dtMs;
     const nowMs = this.startedAtMs + this.elapsedMs;
+    const playerPositionsBeforeMove = this.capturePlayerPositions();
+    const ghostPositionsBeforeMove = this.captureGhostPositions();
 
     this.updateGates();
     this.updatePowerPellets(nowMs);
     this.updateFruitSpawner(nowMs);
     this.updatePlayers(dtMs, nowMs);
     this.updateGhosts(dtMs, nowMs);
-    this.resolveGhostCollisions(nowMs);
+    this.resolveGhostCollisions(nowMs, playerPositionsBeforeMove, ghostPositionsBeforeMove);
     this.updateSectorControl(dtMs, nowMs);
 
     if (this.tickCounter % TICK_RATE === 0) {
@@ -273,7 +279,7 @@ export class GameEngine {
       sectors: this.world.sectors.map((sector) => this.toSectorView(sector)),
       gates: this.world.gates.map((gate) => ({ ...gate })),
       events: drainEvents ? this.events.splice(0, this.events.length) : [...this.events],
-      timeline: this.timeline,
+      timeline: this.timeline.slice(Math.max(0, this.timeline.length - 50)),
     };
   }
 
@@ -488,6 +494,7 @@ export class GameEngine {
 
     if (player.holdUntilMs > nowMs) {
       player.desiredDir = 'none';
+      player.dir = 'none';
       return;
     }
 
@@ -582,6 +589,7 @@ export class GameEngine {
       if (helperNearby) {
         player.holdUntilMs = nowMs + 800;
         player.desiredDir = 'none';
+        player.dir = 'none';
         return true;
       }
     }
@@ -1275,14 +1283,22 @@ export class GameEngine {
     return { x: nearest.x, y: nearest.y };
   }
 
-  private resolveGhostCollisions(nowMs: number): void {
+  private resolveGhostCollisions(
+    nowMs: number,
+    playerPositionsBeforeMove: Map<string, Vec2>,
+    ghostPositionsBeforeMove: Map<string, Vec2>,
+  ): void {
     for (const player of this.players.values()) {
       if (player.state === 'down') {
         continue;
       }
 
       for (const ghost of this.ghosts.values()) {
-        if (ghost.x !== player.x || ghost.y !== player.y) {
+        if (!this.isGhostCollision(player, ghost, playerPositionsBeforeMove, ghostPositionsBeforeMove)) {
+          continue;
+        }
+
+        if (player.remoteReviveGraceUntil > nowMs) {
           continue;
         }
 
@@ -1311,11 +1327,40 @@ export class GameEngine {
     }
   }
 
+  private isGhostCollision(
+    player: PlayerInternal,
+    ghost: GhostInternal,
+    playerPositionsBeforeMove?: Map<string, Vec2>,
+    ghostPositionsBeforeMove?: Map<string, Vec2>,
+  ): boolean {
+    if (ghost.x === player.x && ghost.y === player.y) {
+      return true;
+    }
+
+    if (!playerPositionsBeforeMove || !ghostPositionsBeforeMove) {
+      return false;
+    }
+
+    const playerBefore = playerPositionsBeforeMove.get(player.id);
+    const ghostBefore = ghostPositionsBeforeMove.get(ghost.id);
+    if (!playerBefore || !ghostBefore) {
+      return false;
+    }
+
+    const swapped =
+      playerBefore.x === ghost.x &&
+      playerBefore.y === ghost.y &&
+      ghostBefore.x === player.x &&
+      ghostBefore.y === player.y;
+    return swapped;
+  }
+
   private downPlayer(player: PlayerInternal, nowMs: number): void {
     if (player.state === 'down') {
       return;
     }
     player.state = 'down';
+    player.remoteReviveGraceUntil = 0;
     player.downSince = nowMs;
     player.powerUntil = 0;
     player.moveBuffer = 0;
@@ -1346,6 +1391,7 @@ export class GameEngine {
     player.state = 'normal';
     player.downSince = null;
     player.powerUntil = 0;
+    player.remoteReviveGraceUntil = nowMs + AUTO_RESPAWN_GRACE_MS;
     player.gauge = 0;
     player.stocks = Math.max(0, player.stocks - 1);
     this.events.push({ type: 'player_revived', playerId: player.id, by: player.id, auto: true });
@@ -1357,27 +1403,59 @@ export class GameEngine {
 
   private pickRespawnPoint(player: PlayerInternal): Vec2 {
     const capturedSectors = this.world.sectors.filter((sector) => sector.captured);
-    if (capturedSectors.length === 0) {
-      return player.spawn;
-    }
+    if (capturedSectors.length > 0) {
+      let bestSector = capturedSectors[0] as (typeof capturedSectors)[number];
+      let bestDist = Number.POSITIVE_INFINITY;
+      for (const sector of capturedSectors) {
+        const sx = sector.x + Math.floor(sector.size / 2);
+        const sy = sector.y + Math.floor(sector.size / 2);
+        const dist = manhattan(player.x, player.y, sx, sy);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestSector = sector;
+        }
+      }
 
-    let bestSector = capturedSectors[0] as (typeof capturedSectors)[number];
-    let bestDist = Number.POSITIVE_INFINITY;
-    for (const sector of capturedSectors) {
-      const sx = sector.x + Math.floor(sector.size / 2);
-      const sy = sector.y + Math.floor(sector.size / 2);
-      const dist = manhattan(player.x, player.y, sx, sy);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestSector = sector;
+      const safeInBestSector = bestSector.floorCells.filter((cell) => this.isSafeRespawnCell(cell, player.id));
+      if (safeInBestSector.length > 0) {
+        return this.rng.pick(safeInBestSector);
+      }
+
+      const safeInCaptured = capturedSectors
+        .flatMap((sector) => sector.floorCells)
+        .filter((cell) => this.isSafeRespawnCell(cell, player.id));
+      if (safeInCaptured.length > 0) {
+        return this.rng.pick(safeInCaptured);
       }
     }
 
-    const options = bestSector.floorCells;
-    if (options.length === 0) {
+    if (this.isSafeRespawnCell(player.spawn, player.id)) {
       return player.spawn;
     }
-    return this.rng.pick(options);
+
+    const safeFallback = this.world.playerSpawnCells.filter((cell) => this.isSafeRespawnCell(cell, player.id));
+    if (safeFallback.length > 0) {
+      return this.rng.pick(safeFallback);
+    }
+
+    return player.spawn;
+  }
+
+  private isSafeRespawnCell(cell: Vec2, playerId: string): boolean {
+    if (this.hasGhostAt(cell.x, cell.y)) {
+      return false;
+    }
+    if (this.isOccupiedByOtherStandingPlayer(cell.x, cell.y, playerId)) {
+      return false;
+    }
+    if (this.isGateCellOrSwitch(cell.x, cell.y)) {
+      return false;
+    }
+    const nearestGhost = this.distanceToNearestGhost(cell.x, cell.y);
+    if (nearestGhost !== null && nearestGhost <= 2) {
+      return false;
+    }
+    return true;
   }
 
   private updateSectorControl(dtMs: number, nowMs: number): void {
@@ -1695,6 +1773,22 @@ export class GameEngine {
   private getSectorAt(x: number, y: number) {
     return this.world.sectors[this.getSectorId(x, y)] ?? null;
   }
+
+  private capturePlayerPositions(): Map<string, Vec2> {
+    const positions = new Map<string, Vec2>();
+    for (const player of this.players.values()) {
+      positions.set(player.id, { x: player.x, y: player.y });
+    }
+    return positions;
+  }
+
+  private captureGhostPositions(): Map<string, Vec2> {
+    const positions = new Map<string, Vec2>();
+    for (const ghost of this.ghosts.values()) {
+      positions.set(ghost.id, { x: ghost.x, y: ghost.y });
+    }
+    return positions;
+  }
 }
 
 function pickGhostType(captureRatio: number, rng: Rng): GhostType {
@@ -1780,4 +1874,8 @@ function oppositeOf(dir: Direction): MoveDirection | null {
     return 'left';
   }
   return null;
+}
+
+function isMoveDirection(dir: Direction): dir is MoveDirection {
+  return dir === 'up' || dir === 'down' || dir === 'left' || dir === 'right';
 }
