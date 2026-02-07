@@ -237,7 +237,7 @@ function applyEvent(event: RuntimeEvent): void {
   } else if (event.type === 'boss_spawned') {
     pushLog('ボスゴースト出現');
   } else if (event.type === 'boss_hit') {
-    pushLog(`ボスにヒット (${event.hp}/3)`);
+    pushLog(`ボスにヒット (残りHP: ${event.hp})`);
   } else if (event.type === 'toast') {
     pushLog(event.message);
   }
