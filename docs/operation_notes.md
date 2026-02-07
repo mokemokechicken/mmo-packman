@@ -120,6 +120,20 @@ done
 - `victoryCount=0/5`
 - `avgMaxCapture=25.0%`
 
+## サウンド運用ルール（Issue #36）
+
+- 現在のMVPは Web Audio の合成SEを利用する（覚醒/制覇/ダウン/ボス出現/終了）。
+- 将来の実アセットを導入する場合は以下に配置する。
+  - `src/client/audio/se/`: 効果音（SE）
+  - `src/client/audio/bgm/`: BGM
+- 推奨フォーマット:
+  - SE: `wav` または `ogg`（短尺、レイテンシ重視）
+  - BGM: `ogg`（ループ運用を想定）
+- 命名規則:
+  - `se_awaken.*`, `se_sector_capture.*`, `se_player_down.*`, `se_boss_spawn.*`
+  - `bgm_lobby_*.*`, `bgm_match_*.*`
+- 差し替え時は `id`（イベント種別）と再生責務を維持し、UI設定（音量/ミュート）との互換を壊さないこと。
+
 ## 既知のMVP制約
 
 - 永続化なし

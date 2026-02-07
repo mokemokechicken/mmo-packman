@@ -21,10 +21,13 @@ const result = mustElement<HTMLElement>('result');
 const touchControls = mustElement<HTMLElement>('touch-controls');
 const topStatus = mustElement<HTMLElement>('top-status');
 const spectatorControls = mustElement<HTMLElement>('spectator-controls');
+const audioSettingsPanel = mustElement<HTMLElement>('audio-settings');
 const ctx = mustCanvasContext(canvas);
 
 const dotSet = new Set<string>();
 const pelletMap = new Map<string, { x: number; y: number; active: boolean }>();
+const SOUND_VOLUME_KEY = 'mmo-packman-sound-volume';
+const SOUND_MUTED_KEY = 'mmo-packman-sound-muted';
 
 interface InterpolationState {
   fromX: number;
@@ -41,6 +44,15 @@ let playerName = localStorage.getItem('mmo-packman-name') ?? `Player-${Math.floo
 let preferSpectator = localStorage.getItem('mmo-packman-spectator') === '1';
 let requestedAiCount = normalizeNumber(localStorage.getItem('mmo-packman-ai-count'), 2, 0, 100);
 let requestedTestMinutes = normalizeNumber(localStorage.getItem('mmo-packman-test-minutes'), 5, 1, 10);
+let soundVolume = normalizeNumber(localStorage.getItem(SOUND_VOLUME_KEY), 70, 0, 100) / 100;
+let soundMuted = localStorage.getItem(SOUND_MUTED_KEY) === '1';
+let audioUnlocked = false;
+let audioContext: AudioContext | null = null;
+let audioMasterGain: GainNode | null = null;
+let soundStatusElement: HTMLElement | null = null;
+let soundVolumeLabelElement: HTMLElement | null = null;
+let soundVolumeInputElement: HTMLInputElement | null = null;
+let soundMuteInputElement: HTMLInputElement | null = null;
 
 let sessionId = '';
 let meId = '';
@@ -66,6 +78,8 @@ function start(): void {
   wireKeyboard();
   wireTouchControls();
   initSpectatorControls();
+  initAudioSettingsPanel();
+  wireAudioUnlock();
   window.addEventListener('resize', resize);
   requestAnimationFrame(renderFrame);
 }
@@ -159,6 +173,7 @@ function handleServerMessage(message: ServerMessage): void {
     currentDir = 'none';
     isSpectator = message.isSpectator;
     summary = null;
+    snapshot = null;
     logs = [];
     followPlayerId = null;
     playerInterpolation.clear();
@@ -182,7 +197,9 @@ function handleServerMessage(message: ServerMessage): void {
   }
 
   if (message.type === 'state') {
+    const previousSnapshot = snapshot;
     snapshot = message.snapshot;
+    playAwakenTransitions(previousSnapshot, message.snapshot);
     updateInterpolationStates(message.snapshot);
     for (const event of message.snapshot.events) {
       applyEvent(event);
@@ -194,6 +211,7 @@ function handleServerMessage(message: ServerMessage): void {
 
   if (message.type === 'game_over') {
     summary = normalizeSummary(message.summary);
+    playSoundForGameOver(summary.reason);
     showResult();
     updateStatusPanels();
     return;
@@ -205,6 +223,8 @@ function handleServerMessage(message: ServerMessage): void {
 }
 
 function applyEvent(event: RuntimeEvent): void {
+  playSoundForEvent(event);
+
   if (event.type === 'dot_eaten') {
     dotSet.delete(dotKey(event.x, event.y));
   } else if (event.type === 'dot_respawned') {
@@ -540,6 +560,218 @@ function initSpectatorControls(): void {
   const next = document.getElementById('spectator-next');
   prev?.addEventListener('click', () => cycleSpectatorTarget(-1));
   next?.addEventListener('click', () => cycleSpectatorTarget(1));
+}
+
+function initAudioSettingsPanel(): void {
+  audioSettingsPanel.innerHTML = `
+    <div class="sound-title">サウンド設定</div>
+    <div class="sound-row">
+      <input id="sound-mute" type="checkbox" />
+      <label for="sound-mute">ミュート</label>
+    </div>
+    <label><span id="sound-volume-label">音量</span>
+      <input id="sound-volume" type="range" min="0" max="100" />
+    </label>
+    <div id="sound-status" class="hint"></div>
+  `;
+
+  soundMuteInputElement = document.getElementById('sound-mute') as HTMLInputElement | null;
+  soundVolumeInputElement = document.getElementById('sound-volume') as HTMLInputElement | null;
+  soundStatusElement = document.getElementById('sound-status');
+  soundVolumeLabelElement = document.getElementById('sound-volume-label');
+
+  soundMuteInputElement?.addEventListener('change', () => {
+    soundMuted = !!soundMuteInputElement?.checked;
+    localStorage.setItem(SOUND_MUTED_KEY, soundMuted ? '1' : '0');
+    updateAudioGain();
+    refreshAudioSettingsPanel();
+  });
+
+  soundVolumeInputElement?.addEventListener('input', () => {
+    const currentPercent = Math.round(soundVolume * 100);
+    const value = normalizeNumber(soundVolumeInputElement?.value ?? '', currentPercent, 0, 100);
+    soundVolume = value / 100;
+    localStorage.setItem(SOUND_VOLUME_KEY, String(value));
+    updateAudioGain();
+    refreshAudioSettingsPanel();
+  });
+
+  refreshAudioSettingsPanel();
+}
+
+function refreshAudioSettingsPanel(): void {
+  const volumePercent = Math.round(soundVolume * 100);
+  const statusText = audioUnlocked
+    ? 'サウンド有効'
+    : '初回操作（タップ/キー入力）後に再生されます';
+
+  if (soundMuteInputElement) {
+    soundMuteInputElement.checked = soundMuted;
+  }
+  if (soundVolumeInputElement) {
+    soundVolumeInputElement.value = String(volumePercent);
+  }
+  if (soundStatusElement) {
+    soundStatusElement.textContent = statusText;
+  }
+  if (soundVolumeLabelElement) {
+    soundVolumeLabelElement.textContent = `音量 (${volumePercent}%)`;
+  }
+}
+
+function wireAudioUnlock(): void {
+  const unlock = () => {
+    void ensureAudioUnlocked();
+  };
+
+  window.addEventListener('pointerdown', unlock, { passive: true });
+  window.addEventListener('keydown', unlock);
+  window.addEventListener('touchstart', unlock, { passive: true });
+}
+
+async function ensureAudioUnlocked(): Promise<void> {
+  const audio = ensureAudioContext();
+  if (!audio) {
+    return;
+  }
+  if (audio.state === 'running') {
+    audioUnlocked = true;
+    refreshAudioSettingsPanel();
+    return;
+  }
+  try {
+    await audio.resume();
+  } catch {
+    return;
+  }
+  const resumedState = ensureAudioContext()?.state ?? audio.state;
+  audioUnlocked = resumedState === 'running';
+  refreshAudioSettingsPanel();
+}
+
+function ensureAudioContext(): AudioContext | null {
+  const AudioContextCtor = (window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext);
+  if (!AudioContextCtor) {
+    return null;
+  }
+  if (!audioContext) {
+    audioContext = new AudioContextCtor();
+    audioMasterGain = audioContext.createGain();
+    audioMasterGain.connect(audioContext.destination);
+    updateAudioGain();
+  }
+  return audioContext;
+}
+
+function updateAudioGain(): void {
+  if (!audioContext || !audioMasterGain) {
+    return;
+  }
+  const volume = soundMuted ? 0 : soundVolume;
+  audioMasterGain.gain.setTargetAtTime(volume, audioContext.currentTime, 0.01);
+}
+
+function playSoundForEvent(event: RuntimeEvent): void {
+  if (event.type === 'sector_captured') {
+    playTonePattern([
+      { frequency: 660, durationMs: 90, type: 'triangle' },
+      { frequency: 920, durationMs: 120, type: 'triangle' },
+    ]);
+    return;
+  }
+  if (event.type === 'player_down') {
+    playTonePattern([{ frequency: 190, durationMs: 200, type: 'sawtooth' }]);
+    return;
+  }
+  if (event.type === 'boss_spawned') {
+    playTonePattern([
+      { frequency: 220, durationMs: 120, type: 'sawtooth' },
+      { frequency: 180, durationMs: 130, type: 'sawtooth' },
+      { frequency: 140, durationMs: 170, type: 'sawtooth' },
+    ]);
+  }
+}
+
+function playAwakenTransitions(previous: Snapshot | null, next: Snapshot): void {
+  if (!previous) {
+    return;
+  }
+
+  const previousStateByPlayerId = new Map(previous.players.map((player) => [player.id, player.state] as const));
+  const awakened = next.players.some((player) => previousStateByPlayerId.get(player.id) !== 'power' && player.state === 'power');
+  if (awakened) {
+    playAwakenSound();
+  }
+}
+
+function playAwakenSound(): void {
+  playTonePattern([
+    { frequency: 760, durationMs: 80, type: 'triangle' },
+    { frequency: 1020, durationMs: 80, type: 'triangle' },
+    { frequency: 1360, durationMs: 110, type: 'triangle' },
+  ]);
+}
+
+function playSoundForGameOver(reason: GameSummary['reason']): void {
+  if (reason === 'victory') {
+    playTonePattern([
+      { frequency: 740, durationMs: 100, type: 'triangle' },
+      { frequency: 980, durationMs: 110, type: 'triangle' },
+      { frequency: 1320, durationMs: 160, type: 'triangle' },
+    ]);
+    return;
+  }
+  playTonePattern([
+    { frequency: 280, durationMs: 120, type: 'square' },
+    { frequency: 220, durationMs: 120, type: 'square' },
+    { frequency: 180, durationMs: 170, type: 'square' },
+  ]);
+}
+
+function playTonePattern(
+  tones: Array<{ frequency: number; durationMs: number; type?: OscillatorType }>,
+): void {
+  if (soundMuted || soundVolume <= 0) {
+    return;
+  }
+
+  const audio = ensureAudioContext();
+  const master = audioMasterGain;
+  if (!audio || !master) {
+    return;
+  }
+  if (audio.state !== 'running') {
+    audioUnlocked = false;
+    refreshAudioSettingsPanel();
+    void ensureAudioUnlocked();
+    return;
+  }
+  if (!audioUnlocked) {
+    audioUnlocked = true;
+    refreshAudioSettingsPanel();
+  }
+
+  let offsetMs = 0;
+  for (const tone of tones) {
+    const oscillator = audio.createOscillator();
+    const gain = audio.createGain();
+    const startAt = audio.currentTime + offsetMs / 1000;
+    const durationSec = tone.durationMs / 1000;
+    const type = tone.type ?? 'sine';
+
+    oscillator.type = type;
+    oscillator.frequency.setValueAtTime(tone.frequency, startAt);
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.linearRampToValueAtTime(0.65, startAt + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + durationSec);
+
+    oscillator.connect(gain);
+    gain.connect(master);
+    oscillator.start(startAt);
+    oscillator.stop(startAt + durationSec + 0.02);
+
+    offsetMs += tone.durationMs + 24;
+  }
 }
 
 function updateStatusPanels(): void {
