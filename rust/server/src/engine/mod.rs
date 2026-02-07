@@ -403,6 +403,21 @@ impl GameEngine {
         self.players[player_idx].ai_think_at = now_ms + self.rng.int(90, 190) as u64;
         let player = self.players[player_idx].view.clone();
         let nearest_ghost = self.distance_to_nearest_ghost(player.x, player.y);
+        let danger_threshold = if self.is_large_party_endgame_band() {
+            2
+        } else {
+            4
+        };
+        let rescue_threat_threshold = if self.is_large_party_endgame_band() {
+            2
+        } else {
+            3
+        };
+        let cautious_dot_threshold = if self.is_large_party_endgame_band() {
+            3
+        } else {
+            7
+        };
 
         if player.state == PlayerState::Power {
             self.players[player_idx].desired_dir = self.choose_chase_direction(player.x, player.y);
@@ -410,7 +425,7 @@ impl GameEngine {
         }
 
         if let Some(dist) = nearest_ghost {
-            if dist <= 4 {
+            if dist <= danger_threshold {
                 if player.stocks > 0 && player.state != PlayerState::Power {
                     self.players[player_idx].awaken_requested = true;
                 }
@@ -423,7 +438,7 @@ impl GameEngine {
         if let Some((down_idx, _)) = self.find_rescue_target(player_idx) {
             let down = self.players[down_idx].view.clone();
             let rescue_threat = self.distance_to_nearest_ghost(down.x, down.y).unwrap_or(99);
-            if rescue_threat <= 3 && player.stocks > 0 {
+            if rescue_threat <= rescue_threat_threshold && player.stocks > 0 {
                 self.players[player_idx].awaken_requested = true;
             }
             self.players[player_idx].desired_dir =
@@ -431,7 +446,7 @@ impl GameEngine {
             return;
         }
 
-        if nearest_ghost.unwrap_or(99) <= 7 {
+        if nearest_ghost.unwrap_or(99) <= cautious_dot_threshold {
             self.players[player_idx].desired_dir =
                 self.choose_safe_dot_direction(player.x, player.y);
             return;
@@ -445,6 +460,7 @@ impl GameEngine {
         let Some(player) = self.players.get(idx) else {
             return speed;
         };
+        speed *= self.large_party_player_speed_multiplier();
 
         if let Some(sector_id) = self.get_sector_id(player.view.x, player.view.y) {
             if self
@@ -462,6 +478,50 @@ impl GameEngine {
             speed *= 1.3;
         }
         speed
+    }
+
+    fn is_large_party_endgame_band(&self) -> bool {
+        (80..=100).contains(&self.player_count)
+    }
+
+    fn large_party_player_speed_multiplier(&self) -> f32 {
+        if self.is_large_party_endgame_band() {
+            1.5
+        } else {
+            1.0
+        }
+    }
+
+    fn large_party_regen_relief_factor(&self) -> f32 {
+        if self.is_large_party_endgame_band() {
+            0.05
+        } else {
+            1.0
+        }
+    }
+
+    fn large_party_ghost_target_profile(&self) -> (f32, f32, f32, f32) {
+        if self.is_large_party_endgame_band() {
+            (0.2, 0.45, 0.2, 0.6)
+        } else {
+            (0.5, 1.0, 0.7, 1.0)
+        }
+    }
+
+    fn large_party_capture_threshold_ratio(&self) -> f32 {
+        if self.is_large_party_endgame_band() {
+            0.35
+        } else {
+            0.0
+        }
+    }
+
+    fn large_party_loss_threshold_ratio(&self) -> f32 {
+        if self.is_large_party_endgame_band() {
+            0.45
+        } else {
+            0.05
+        }
     }
 
     fn update_ghosts(&mut self, dt_ms: u64, now_ms: u64) {
@@ -1286,6 +1346,133 @@ mod tests {
     }
 
     #[test]
+    fn large_party_profiles_are_applied_by_player_count() {
+        let large = GameEngine::new(
+            make_players(80),
+            Difficulty::Normal,
+            8_001,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        assert!(approx_eq(
+            large.large_party_player_speed_multiplier(),
+            1.5,
+            0.0001
+        ));
+        assert!(approx_eq(large.large_party_regen_relief_factor(), 0.05, 0.0001));
+        assert_eq!(
+            large.large_party_ghost_target_profile(),
+            (0.2, 0.45, 0.2, 0.6)
+        );
+        assert!(approx_eq(
+            large.large_party_capture_threshold_ratio(),
+            0.35,
+            0.0001
+        ));
+        assert!(approx_eq(
+            large.large_party_loss_threshold_ratio(),
+            0.45,
+            0.0001
+        ));
+
+        let medium = GameEngine::new(
+            make_players(60),
+            Difficulty::Normal,
+            8_002,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        assert!(approx_eq(
+            medium.large_party_player_speed_multiplier(),
+            1.0,
+            0.0001
+        ));
+        assert!(approx_eq(
+            medium.large_party_regen_relief_factor(),
+            1.0,
+            0.0001
+        ));
+        assert_eq!(
+            medium.large_party_ghost_target_profile(),
+            (0.5, 1.0, 0.7, 1.0)
+        );
+        assert!(approx_eq(
+            medium.large_party_capture_threshold_ratio(),
+            0.0,
+            0.0001
+        ));
+        assert!(approx_eq(
+            medium.large_party_loss_threshold_ratio(),
+            0.05,
+            0.0001
+        ));
+
+        let small = GameEngine::new(
+            make_players(5),
+            Difficulty::Normal,
+            8_003,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        assert!(approx_eq(
+            small.large_party_player_speed_multiplier(),
+            1.0,
+            0.0001
+        ));
+        assert!(approx_eq(small.large_party_regen_relief_factor(), 1.0, 0.0001));
+        assert_eq!(
+            small.large_party_ghost_target_profile(),
+            (0.5, 1.0, 0.7, 1.0)
+        );
+        assert!(approx_eq(
+            small.large_party_capture_threshold_ratio(),
+            0.0,
+            0.0001
+        ));
+        assert!(approx_eq(
+            small.large_party_loss_threshold_ratio(),
+            0.05,
+            0.0001
+        ));
+
+        let overflow = GameEngine::new(
+            make_players(101),
+            Difficulty::Normal,
+            8_004,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        assert!(approx_eq(
+            overflow.large_party_player_speed_multiplier(),
+            1.0,
+            0.0001
+        ));
+        assert!(approx_eq(
+            overflow.large_party_regen_relief_factor(),
+            1.0,
+            0.0001
+        ));
+        assert_eq!(
+            overflow.large_party_ghost_target_profile(),
+            (0.5, 1.0, 0.7, 1.0)
+        );
+        assert!(approx_eq(
+            overflow.large_party_capture_threshold_ratio(),
+            0.0,
+            0.0001
+        ));
+        assert!(approx_eq(
+            overflow.large_party_loss_threshold_ratio(),
+            0.05,
+            0.0001
+        ));
+    }
+
+    #[test]
     fn capture_sector_respawns_ghosts_inside_it() {
         let mut engine = GameEngine::new(
             make_players(2),
@@ -1315,6 +1502,149 @@ mod tests {
             .iter()
             .any(|ghost| engine.get_sector_id(ghost.view.x, ghost.view.y) == Some(target_sector));
         assert!(!still_inside);
+    }
+
+    #[test]
+    fn large_party_ai_danger_threshold_starts_at_eighty_players() {
+        let mut sixty = GameEngine::new(
+            make_players(60),
+            Difficulty::Normal,
+            8_101,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        sixty.ghosts.truncate(1);
+        sixty.players[0].view.x = 10;
+        sixty.players[0].view.y = 10;
+        sixty.players[0].view.state = PlayerState::Normal;
+        sixty.players[0].view.stocks = 1;
+        sixty.players[0].awaken_requested = false;
+        sixty.players[0].ai_think_at = 0;
+        sixty.ghosts[0].view.x = 13;
+        sixty.ghosts[0].view.y = 10;
+        sixty.update_player_ai(0, sixty.started_at_ms + 1_000);
+        assert!(sixty.players[0].awaken_requested);
+
+        let mut eighty = GameEngine::new(
+            make_players(80),
+            Difficulty::Normal,
+            8_102,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        eighty.ghosts.truncate(1);
+        eighty.players[0].view.x = 10;
+        eighty.players[0].view.y = 10;
+        eighty.players[0].view.state = PlayerState::Normal;
+        eighty.players[0].view.stocks = 1;
+        eighty.players[0].awaken_requested = false;
+        eighty.players[0].ai_think_at = 0;
+        eighty.ghosts[0].view.x = 13;
+        eighty.ghosts[0].view.y = 10;
+        eighty.update_player_ai(0, eighty.started_at_ms + 1_000);
+        assert!(!eighty.players[0].awaken_requested);
+    }
+
+    #[test]
+    fn large_party_capture_threshold_applies_only_in_endgame_band() {
+        let mut band = GameEngine::new(
+            make_players(80),
+            Difficulty::Normal,
+            8_103,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        let sector_id = 0usize;
+        band.world.sectors[sector_id].view.captured = false;
+        band.world.sectors[sector_id].view.total_dots = 20;
+        band.world.sectors[sector_id].view.dot_count = 7;
+        band.update_sector_control(TICK_MS, band.started_at_ms + TICK_MS);
+        assert!(band.world.sectors[sector_id].view.captured);
+
+        let mut below = GameEngine::new(
+            make_players(79),
+            Difficulty::Normal,
+            8_108,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        below.world.sectors[sector_id].view.captured = false;
+        below.world.sectors[sector_id].view.total_dots = 20;
+        below.world.sectors[sector_id].view.dot_count = 7;
+        below.update_sector_control(TICK_MS, below.started_at_ms + TICK_MS);
+
+        assert!(!below.world.sectors[sector_id].view.captured);
+    }
+
+    #[test]
+    fn large_party_loss_threshold_releases_sector_before_default_rule() {
+        let mut engine = GameEngine::new(
+            make_players(80),
+            Difficulty::Normal,
+            8_104,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        let sector_id = 0usize;
+        engine.world.sectors[sector_id].view.captured = true;
+        engine.world.sectors[sector_id].view.total_dots = 20;
+        engine.world.sectors[sector_id].view.dot_count = 10;
+        engine.world.sectors[sector_id].captured_at = engine.started_at_ms.saturating_sub(200_000);
+
+        engine.update_sector_control(TICK_MS, engine.started_at_ms + TICK_MS);
+
+        assert!(!engine.world.sectors[sector_id].view.captured);
+        let lost_event = engine.events.iter().any(|event| {
+            matches!(event, RuntimeEvent::SectorLost { sector_id: id } if *id == sector_id)
+        });
+        assert!(lost_event);
+    }
+
+    #[test]
+    fn large_party_ghost_population_is_reduced_by_profile_target() {
+        let mut engine = GameEngine::new(
+            make_players(80),
+            Difficulty::Normal,
+            8_105,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        let before = engine.ghosts.len();
+        engine.adjust_ghost_population(engine.started_at_ms + 1_000);
+        assert_eq!(engine.ghosts.len(), before.saturating_sub(2));
+    }
+
+    #[test]
+    fn large_party_population_profile_is_not_applied_below_eighty_players() {
+        let mut below = GameEngine::new(
+            make_players(79),
+            Difficulty::Normal,
+            8_106,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        below.ghosts.truncate(40);
+        below.adjust_ghost_population(below.started_at_ms + 1_000);
+        assert_eq!(below.ghosts.len(), 43);
+
+        let mut band = GameEngine::new(
+            make_players(80),
+            Difficulty::Normal,
+            8_107,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        band.ghosts.truncate(40);
+        band.adjust_ghost_population(band.started_at_ms + 1_000);
+        assert_eq!(band.ghosts.len(), 38);
     }
 
     #[test]

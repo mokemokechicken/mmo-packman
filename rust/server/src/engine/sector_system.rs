@@ -3,8 +3,11 @@ use super::*;
 impl GameEngine {
     pub(super) fn update_sector_control(&mut self, dt_ms: u64, now_ms: u64) {
         for sector_id in 0..self.world.sectors.len() {
+            let capture_threshold = ((self.world.sectors[sector_id].view.total_dots as f32)
+                * self.large_party_capture_threshold_ratio())
+            .floor() as i32;
             if !self.world.sectors[sector_id].view.captured
-                && self.world.sectors[sector_id].view.dot_count <= 0
+                && self.world.sectors[sector_id].view.dot_count <= capture_threshold
             {
                 self.capture_sector(sector_id, now_ms);
             }
@@ -30,7 +33,11 @@ impl GameEngine {
             } else {
                 1.0
             };
-            let regen_rate = 0.33 * regen_multiplier * self.difficulty_multiplier.1 * invader_boost;
+            let regen_rate = 0.33
+                * regen_multiplier
+                * self.difficulty_multiplier.1
+                * invader_boost
+                * self.large_party_regen_relief_factor();
             self.world.sectors[sector_id].regen_accumulator += regen_rate * dt_sec;
 
             while self.world.sectors[sector_id].regen_accumulator >= 1.0 {
@@ -41,8 +48,9 @@ impl GameEngine {
                 self.world.sectors[sector_id].regen_accumulator -= 1.0;
             }
 
-            let threshold =
-                ((self.world.sectors[sector_id].view.total_dots as f32) * 0.05).floor() as i32;
+            let threshold = ((self.world.sectors[sector_id].view.total_dots as f32)
+                * self.large_party_loss_threshold_ratio())
+            .floor() as i32;
             if self.world.sectors[sector_id].view.dot_count > threshold.max(1) {
                 self.world.sectors[sector_id].view.captured = false;
                 self.world.sectors[sector_id].regen_accumulator = 0.0;
@@ -58,10 +66,12 @@ impl GameEngine {
             .iter()
             .filter(|p| p.view.state != PlayerState::Down)
             .count();
-        let target = ((self.max_ghosts as f32 * 0.5)
-            .max(active_players as f32 * (1.0 + ratio * 0.7)))
+        let (base_factor, active_base, active_ratio_factor, max_factor) =
+            self.large_party_ghost_target_profile();
+        let target = ((self.max_ghosts as f32 * base_factor)
+            .max(active_players as f32 * (active_base + ratio * active_ratio_factor)))
         .round();
-        let target = target.clamp(4.0, self.max_ghosts as f32) as usize;
+        let target = target.clamp(4.0, self.max_ghosts as f32 * max_factor) as usize;
 
         if self.ghosts.len() < target {
             let add = (target - self.ghosts.len()).min(3);
@@ -110,7 +120,7 @@ impl GameEngine {
             self.end_reason = Some(GameOverReason::Victory);
             self.timeline.push(TimelineEvent {
                 at_ms: self.elapsed_ms,
-                label: "全エリア制覇".to_string(),
+                label: "全エリア掌握".to_string(),
             });
             return;
         }

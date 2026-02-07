@@ -50,6 +50,43 @@ done
 
 - `allDownRate: 30.0%`（10試行中 3件）
 
+## 大人数終盤到達性の定期観測（Issue #43）
+
+対象シナリオ:
+
+- `AI x80 / normal / 10分 / seed 3001-3002`
+- `AI x100 / normal / 10分 / seed 3101-3102`
+
+観測指標:
+
+- `avgMaxCapture`: 代表seed群の平均最大制覇率（目標: 70%以上）
+- `allDownRate`: `reason == all_down` の割合（大人数バランス破綻の早期検知）
+- `sectorLostTotal`: セクター喪失イベント総数（終盤維持コスト過多の監視）
+
+仕様メモ:
+
+- issue #43 では 80〜100人帯のみ、残ドット35%以下を「セクター掌握」として扱う。
+
+計測コマンド:
+
+```bash
+for seed in 3001 3002; do
+  npm run -s simulate -- --single --ai 80 --minutes 10 --difficulty normal --seed "$seed"
+done
+for seed in 3101 3102; do
+  npm run -s simulate -- --single --ai 100 --minutes 10 --difficulty normal --seed "$seed"
+done
+```
+
+最新計測（2026-02-07, issue #43 対応後）:
+
+- `AI x80`: `maxCapture=83.3, 80.6`（`avgMaxCapture=81.95%`）, `allDownRate=0%`, `sectorLostTotal=1`
+- `AI x100`: `maxCapture=94.4, 88.9`（`avgMaxCapture=91.65%`）, `allDownRate=0%`, `sectorLostTotal=2`
+
+参考ベースライン（調整前, issue #43 着手前）:
+
+- `AI x80`: `maxCapture=25.0, 13.9`（`avgMaxCapture=19.45%`）
+
 ## 既知のMVP制約
 
 - 永続化なし
