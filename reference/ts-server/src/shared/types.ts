@@ -185,7 +185,7 @@ export interface GameSummary {
 }
 
 export type ClientMessage =
-  | { type: 'hello'; name: string; reconnectToken?: string; spectator?: boolean }
+  | { type: 'hello'; name: string; reconnectToken?: string; spectator?: boolean; roomId?: string }
   | { type: 'lobby_start'; difficulty?: Difficulty; aiPlayerCount?: number; timeLimitMinutes?: number }
   | { type: 'input'; dir?: Exclude<Direction, 'none'>; awaken?: boolean }
   | { type: 'place_ping'; kind: PingType }

@@ -62,6 +62,7 @@ let ws: WebSocket | null = null;
 let reconnectTimer: number | null = null;
 let reconnectToken = localStorage.getItem('mmo-packman-token') ?? '';
 let playerName = localStorage.getItem('mmo-packman-name') ?? `Player-${Math.floor(Math.random() * 1000)}`;
+let roomId = localStorage.getItem('mmo-packman-room') ?? 'main';
 let preferSpectator = localStorage.getItem('mmo-packman-spectator') === '1';
 let requestedAiCount = normalizeNumber(localStorage.getItem('mmo-packman-ai-count'), 2, 0, 100);
 let requestedTestMinutes = normalizeNumber(localStorage.getItem('mmo-packman-test-minutes'), 5, 1, 10);
@@ -166,6 +167,7 @@ function sendHello(): void {
     name: playerName,
     reconnectToken: reconnectToken || undefined,
     spectator: preferSpectator,
+    roomId,
   };
   send(hello);
 }
@@ -455,6 +457,10 @@ function renderLobby(players: LobbyPlayer[], running: boolean, canStart: boolean
         <input id="name-input" value="${escapeHtml(playerName)}" maxlength="16" />
       </label>
 
+      <label>ルームID
+        <input id="room-input" value="${escapeHtml(roomId)}" maxlength="24" />
+      </label>
+
       <label>参加モード
         <select id="mode-select">
           <option value="player" ${preferSpectator ? '' : 'selected'}>プレイヤー</option>
@@ -478,6 +484,7 @@ function renderLobby(players: LobbyPlayer[], running: boolean, canStart: boolean
 
       <button id="save-profile">設定を保存</button>
       <button id="start-game" ${isHost && canStart && !running ? '' : 'disabled'}>${running ? '進行中' : 'テスト開始'}</button>
+      <p class="muted">room: ${escapeHtml(roomId)}</p>
       <p class="muted">${lobbyMessage || 'Host が開始します。観戦者は進行中でも接続可能です。'}</p>
 
       <h2>ロビー</h2>
@@ -511,16 +518,19 @@ function renderLobby(players: LobbyPlayer[], running: boolean, canStart: boolean
 
   saveProfile?.addEventListener('click', () => {
     const nameInput = document.getElementById('name-input') as HTMLInputElement | null;
+    const roomInput = document.getElementById('room-input') as HTMLInputElement | null;
     const modeSelect = document.getElementById('mode-select') as HTMLSelectElement | null;
     const aiInput = document.getElementById('ai-count') as HTMLInputElement | null;
     const minutesInput = document.getElementById('test-minutes') as HTMLInputElement | null;
 
     playerName = nameInput?.value.trim().slice(0, 16) || playerName;
+    roomId = (roomInput?.value.trim().slice(0, 24) || roomId).replace(/[^a-zA-Z0-9_-]/g, '') || 'main';
     preferSpectator = modeSelect?.value === 'spectator';
     requestedAiCount = normalizeNumber(aiInput?.value ?? '', requestedAiCount, 0, 100);
     requestedTestMinutes = normalizeNumber(minutesInput?.value ?? '', requestedTestMinutes, 1, 10);
 
     localStorage.setItem('mmo-packman-name', playerName);
+    localStorage.setItem('mmo-packman-room', roomId);
     localStorage.setItem('mmo-packman-spectator', preferSpectator ? '1' : '0');
     localStorage.setItem('mmo-packman-ai-count', String(requestedAiCount));
     localStorage.setItem('mmo-packman-test-minutes', String(requestedTestMinutes));
