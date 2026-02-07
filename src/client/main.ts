@@ -180,7 +180,8 @@ function wsUrl(): string {
   }
 
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const port = window.location.port === '5173' ? '8080' : window.location.port;
+  const frontendPorts = new Set(['5173', '4173']);
+  const port = frontendPorts.has(window.location.port) ? '8080' : window.location.port;
   return `${proto}//${window.location.hostname}${port ? `:${port}` : ''}/ws`;
 }
 
@@ -1803,8 +1804,16 @@ function draw(): void {
   const originX = Math.floor(canvas.width / 2 - centerX * tileSize);
   const originY = Math.floor(canvas.height / 2 - centerY * tileSize);
 
-  const visibleCols = Math.ceil(canvas.width / tileSize) + 4;
-  const visibleRows = Math.ceil(canvas.height / tileSize) + 4;
+  const viewportCols = Math.ceil(canvas.width / tileSize) + 4;
+  const viewportRows = Math.ceil(canvas.height / tileSize) + 4;
+  const viewportMinX = Math.max(0, Math.floor(centerX - viewportCols / 2));
+  const viewportMinY = Math.max(0, Math.floor(centerY - viewportRows / 2));
+  const viewportMaxX = Math.min(world.width - 1, Math.ceil(centerX + viewportCols / 2));
+  const viewportMaxY = Math.min(world.height - 1, Math.ceil(centerY + viewportRows / 2));
+
+  const renderRangeScale = isSpectator ? 1 : 1.5;
+  const visibleCols = Math.ceil(viewportCols * renderRangeScale);
+  const visibleRows = Math.ceil(viewportRows * renderRangeScale);
   const minX = Math.max(0, Math.floor(centerX - visibleCols / 2));
   const minY = Math.max(0, Math.floor(centerY - visibleRows / 2));
   const maxX = Math.min(world.width - 1, Math.ceil(centerX + visibleCols / 2));
@@ -1905,7 +1914,7 @@ function draw(): void {
     snapshot.nowMs,
   );
   drawPings(snapshot.pings, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY, snapshot.nowMs);
-  drawSpectatorMinimap(world, snapshot, minX, minY, maxX, maxY);
+  drawSpectatorMinimap(world, snapshot, viewportMinX, viewportMinY, viewportMaxX, viewportMaxY);
 }
 
 function drawWallOutlines(
@@ -2345,6 +2354,11 @@ function updateEntityInterpolationMap(
       continue;
     }
 
+    const moved = previous.toX !== entity.x || previous.toY !== entity.y;
+    if (!moved) {
+      continue;
+    }
+
     const previousDurationMs = Math.max(1, previous.durationMs);
     const previousAlpha = clampNumber((nowMs - previous.updatedAtMs) / previousDurationMs, 0, 1);
     let fromX = previous.fromX + (previous.toX - previous.fromX) * previousAlpha;
@@ -2354,11 +2368,12 @@ function updateEntityInterpolationMap(
       fromX = entity.x;
       fromY = entity.y;
     }
-    const moved = previous.toX !== entity.x || previous.toY !== entity.y;
-    const moveIntervalMs = moved ? nowMs - previous.lastMoveAtMs : previous.durationMs;
-    const durationMs = moved
-      ? clampNumber(moveIntervalMs, durationFloorMs, durationCeilingMs)
-      : previous.durationMs;
+    const rawMoveIntervalMs = nowMs - previous.lastMoveAtMs;
+    // Avoid very slow interpolation right after a long idle period.
+    const fallbackIntervalMs = Math.max(previous.durationMs, durationFloorMs * 3);
+    const moveIntervalMs = rawMoveIntervalMs > durationCeilingMs ? fallbackIntervalMs : rawMoveIntervalMs;
+    const targetDurationMs = clampNumber(moveIntervalMs, durationFloorMs, durationCeilingMs);
+    const durationMs = clampNumber(previous.durationMs * 0.35 + targetDurationMs * 0.65, durationFloorMs, durationCeilingMs);
 
     map.set(entity.id, {
       fromX,
@@ -2367,7 +2382,7 @@ function updateEntityInterpolationMap(
       toY: entity.y,
       updatedAtMs: nowMs,
       durationMs,
-      lastMoveAtMs: moved ? nowMs : previous.lastMoveAtMs,
+      lastMoveAtMs: nowMs,
     });
   }
 

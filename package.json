@@ -8,6 +8,7 @@
     "dev:client": "vite",
     "build": "npm run build:client",
     "build:client": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 5173",
     "check": "npm run generate:game-rules:check && tsc -p tsconfig.client.json --noEmit",
     "test": "npm run generate:game-rules:check && npm run test:generator && npm run test:parity:selftest && npm run test:ping-manager && npm run test:replay-parser && npm run test:ranking-store && npm run test:aoi",
     "test:generator": "node scripts/generate-game-rules.selftest.mjs",

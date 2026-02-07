@@ -1804,12 +1804,18 @@ mod tests {
         let target_sector = engine
             .get_sector_id(engine.ghosts[0].view.x, engine.ghosts[0].view.y)
             .expect("ghost in sector");
+        let target_view = engine.world.sectors[target_sector].view.clone();
         let fallback_spawn = engine
             .world
             .sectors
             .iter()
+            .filter(|sector| {
+                let row_distance = (sector.view.row - target_view.row).abs();
+                let col_distance = (sector.view.col - target_view.col).abs();
+                row_distance + col_distance >= 2
+            })
             .flat_map(|sector| sector.floor_cells.iter().copied())
-            .find(|cell| engine.get_sector_id(cell.x, cell.y) != Some(target_sector))
+            .next()
             .expect("find floor cell in different sector");
         engine.world.ghost_spawn_cells = vec![fallback_spawn];
 

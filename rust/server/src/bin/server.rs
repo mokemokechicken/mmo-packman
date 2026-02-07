@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,6 +17,7 @@ use rand::distr::Alphanumeric;
 use rand::Rng;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex};
+use tower_http::services::{ServeDir, ServeFile};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -95,6 +97,22 @@ async fn main() {
         .route("/ws", get(ws_handler))
         .with_state(state);
 
+    let app = if let Some(static_dir) = resolve_static_dir() {
+        let index_file = static_dir.join("index.html");
+        println!(
+            "[server] static file root: {}",
+            static_dir.to_string_lossy()
+        );
+        app.fallback_service(
+            ServeDir::new(static_dir).not_found_service(ServeFile::new(index_file)),
+        )
+    } else {
+        eprintln!(
+            "[server] static file root not found. run `npm run build` to generate dist/client."
+        );
+        app
+    };
+
     let bind_addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
@@ -104,6 +122,26 @@ async fn main() {
     axum::serve(listener, app)
         .await
         .expect("server runtime failed");
+}
+
+fn resolve_static_dir() -> Option<PathBuf> {
+    if let Ok(raw) = std::env::var("STATIC_DIR") {
+        let path = PathBuf::from(raw);
+        if path.join("index.html").is_file() {
+            return Some(path);
+        }
+    }
+
+    let candidates = [
+        PathBuf::from("dist/client"),
+        PathBuf::from("../../dist/client"),
+    ];
+    for path in candidates {
+        if path.join("index.html").is_file() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 async fn healthz() -> impl IntoResponse {

@@ -29,6 +29,7 @@ npm run start:rust-server
 
 - WebSocket endpoint: `ws://localhost:8080/ws`
 - health check: `http://localhost:8080/healthz`
+- `dist/client/index.html` が存在する場合、`http://localhost:8080` で静的配信も行う。
 
 ## ビルド
 
@@ -39,6 +40,15 @@ npm run build
 生成物:
 
 - `dist/client/`
+
+## 静的配信での確認（build成果物）
+
+```bash
+npm run build
+npm run start
+```
+
+- Rust サーバーが `dist/client/` を直接配信する。
 
 ## 型チェック
 

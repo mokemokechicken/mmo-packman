@@ -118,14 +118,18 @@ pub fn generate_world(player_count: usize, seed: u32) -> GeneratedWorld {
 
     let player_spawn_cells = collect_player_spawns(&sectors, side);
     let ghost_spawn_cells = collect_ghost_spawns(&sectors, side, &player_spawn_cells);
-    let primary_spawn = player_spawn_cells
-        .first()
-        .copied()
-        .or_else(|| sectors.iter().find_map(|sector| sector.floor_cells.first().copied()));
+    let primary_spawn = player_spawn_cells.first().copied().or_else(|| {
+        sectors
+            .iter()
+            .find_map(|sector| sector.floor_cells.first().copied())
+    });
     let reachable_floor_cells = build_reachable_floor_cells(&grid, width, height, primary_spawn);
 
     power_pellets.retain(|_, pellet| reachable_floor_cells.contains(&(pellet.x, pellet.y)));
-    let pellet_keys: HashSet<(i32, i32)> = power_pellets.values().map(|pellet| (pellet.x, pellet.y)).collect();
+    let pellet_keys: HashSet<(i32, i32)> = power_pellets
+        .values()
+        .map(|pellet| (pellet.x, pellet.y))
+        .collect();
 
     let mut spawn_protected = HashSet::new();
     for spawn in &player_spawn_cells {
@@ -276,32 +280,195 @@ fn carve_sector(
     sector_type: SectorType,
     rng: &mut Rng,
 ) {
-    let open_rate = match sector_type {
-        SectorType::Normal => 0.82,
-        SectorType::Narrow => 0.65,
-        SectorType::Plaza => 0.94,
-        SectorType::Dark => 0.78,
-        SectorType::Fast => 0.86,
-        SectorType::Nest => 0.8,
-    };
-
     for ly in 0..size {
         for lx in 0..size {
             let x = x0 + lx;
             let y = y0 + ly;
-            if lx == 0 || ly == 0 || lx == size - 1 || ly == size - 1 {
-                grid[y as usize][x as usize] = '#';
-                continue;
-            }
-            grid[y as usize][x as usize] = if rng.bool(open_rate) { '.' } else { '#' };
+            grid[y as usize][x as usize] = '#';
         }
     }
 
-    let cx = x0 + size / 2;
-    let cy = y0 + size / 2;
-    for y in (cy - 1)..=(cy + 1) {
-        for x in (cx - 1)..=(cx + 1) {
-            grid[y as usize][x as usize] = '.';
+    let center = size / 2;
+    let left_max = (center - 1).max(1);
+    let mut odd_rows = Vec::new();
+    for y in 1..=(size - 2) {
+        if y % 2 == 1 {
+            odd_rows.push(y);
+        }
+    }
+    let start_x = if left_max >= 3 && rng.bool(0.5) { 3 } else { 1 };
+    let start_y = odd_rows[rng.pick_index(odd_rows.len())];
+
+    let mut visited = HashSet::new();
+    let mut stack = vec![(start_x, start_y)];
+    visited.insert((start_x, start_y));
+    set_sector_floor_pair(grid, x0, y0, size, start_x, start_y);
+
+    while let Some((cx, cy)) = stack.last().copied() {
+        let mut next_candidates = Vec::new();
+        for (dx, dy) in [(0, -2), (0, 2), (-2, 0), (2, 0)] {
+            let nx = cx + dx;
+            let ny = cy + dy;
+            if nx < 1 || nx > left_max || ny < 1 || ny > size - 2 {
+                continue;
+            }
+            if nx % 2 == 0 || ny % 2 == 0 {
+                continue;
+            }
+            if visited.contains(&(nx, ny)) {
+                continue;
+            }
+            next_candidates.push((nx, ny));
+        }
+
+        if next_candidates.is_empty() {
+            stack.pop();
+            continue;
+        }
+
+        let (nx, ny) = next_candidates[rng.pick_index(next_candidates.len())];
+        let px = (cx + nx) / 2;
+        let py = (cy + ny) / 2;
+        set_sector_floor_pair(grid, x0, y0, size, px, py);
+        set_sector_floor_pair(grid, x0, y0, size, nx, ny);
+        visited.insert((nx, ny));
+        stack.push((nx, ny));
+    }
+
+    for lx in 1..(size - 1) {
+        set_sector_floor(grid, x0, y0, size, lx, center);
+    }
+    for ly in 1..(size - 1) {
+        set_sector_floor(grid, x0, y0, size, center, ly);
+    }
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            set_sector_floor(grid, x0, y0, size, center + dx, center + dy);
+        }
+    }
+
+    let extra_loops = match sector_type {
+        SectorType::Plaza => 12,
+        SectorType::Fast => 10,
+        SectorType::Normal => 8,
+        SectorType::Nest => 7,
+        SectorType::Dark => 6,
+        SectorType::Narrow => 4,
+    };
+    for _ in 0..extra_loops {
+        let lx = 1 + rng.pick_index(left_max as usize) as i32;
+        let ly = 1 + rng.pick_index((size - 2) as usize) as i32;
+        set_sector_floor_pair(grid, x0, y0, size, lx, ly);
+        if rng.bool(0.3) {
+            set_sector_floor_pair(grid, x0, y0, size, lx, (ly + 1).min(size - 2));
+        }
+    }
+
+    let extra_walls = match sector_type {
+        SectorType::Narrow => 10,
+        SectorType::Dark => 7,
+        _ => 0,
+    };
+    for _ in 0..extra_walls {
+        let lx = 2 + rng.pick_index((left_max - 1).max(1) as usize) as i32;
+        let ly = 2 + rng.pick_index((size - 3).max(1) as usize) as i32;
+        if (lx - center).abs() <= 1 || (ly - center).abs() <= 1 {
+            continue;
+        }
+        set_sector_wall_pair(grid, x0, y0, size, lx, ly);
+    }
+
+    apply_sector_ribs(grid, x0, y0, size, sector_type, rng);
+
+    for offset in -2..=2 {
+        set_sector_floor(grid, x0, y0, size, 1, center + offset);
+        set_sector_floor(grid, x0, y0, size, size - 2, center + offset);
+        set_sector_floor(grid, x0, y0, size, center + offset, 1);
+        set_sector_floor(grid, x0, y0, size, center + offset, size - 2);
+    }
+}
+
+fn set_sector_floor(
+    grid: &mut [Vec<char>],
+    x0: i32,
+    y0: i32,
+    size: i32,
+    local_x: i32,
+    local_y: i32,
+) {
+    if local_x <= 0 || local_y <= 0 || local_x >= size - 1 || local_y >= size - 1 {
+        return;
+    }
+    grid[(y0 + local_y) as usize][(x0 + local_x) as usize] = '.';
+}
+
+fn set_sector_floor_pair(
+    grid: &mut [Vec<char>],
+    x0: i32,
+    y0: i32,
+    size: i32,
+    local_x: i32,
+    local_y: i32,
+) {
+    set_sector_floor(grid, x0, y0, size, local_x, local_y);
+    let mirror_x = size - 1 - local_x;
+    set_sector_floor(grid, x0, y0, size, mirror_x, local_y);
+}
+
+fn set_sector_wall_pair(
+    grid: &mut [Vec<char>],
+    x0: i32,
+    y0: i32,
+    size: i32,
+    local_x: i32,
+    local_y: i32,
+) {
+    if local_x <= 0 || local_y <= 0 || local_x >= size - 1 || local_y >= size - 1 {
+        return;
+    }
+    grid[(y0 + local_y) as usize][(x0 + local_x) as usize] = '#';
+    let mirror_x = size - 1 - local_x;
+    if mirror_x > 0 && mirror_x < size - 1 {
+        grid[(y0 + local_y) as usize][(x0 + mirror_x) as usize] = '#';
+    }
+}
+
+fn apply_sector_ribs(
+    grid: &mut [Vec<char>],
+    x0: i32,
+    y0: i32,
+    size: i32,
+    sector_type: SectorType,
+    rng: &mut Rng,
+) {
+    let center = size / 2;
+    let rib_columns: &[i32] = match sector_type {
+        SectorType::Plaza => &[6],
+        SectorType::Fast => &[5, 7],
+        SectorType::Normal => &[5],
+        SectorType::Nest => &[4, 6],
+        SectorType::Dark => &[4, 6],
+        SectorType::Narrow => &[3, 5, 7],
+    };
+
+    for &rib_x in rib_columns {
+        if rib_x <= 1 || rib_x >= center {
+            continue;
+        }
+        let gap_a = 2 + rng.pick_index((size - 4) as usize) as i32;
+        let mut gap_b = 2 + rng.pick_index((size - 4) as usize) as i32;
+        if (gap_b - gap_a).abs() <= 2 {
+            gap_b = (gap_b + 4).min(size - 3);
+        }
+
+        for y in 1..(size - 1) {
+            let is_center_gap = (y - center).abs() <= 1;
+            let is_random_gap = y == gap_a || y == gap_b;
+            if is_center_gap || is_random_gap {
+                set_sector_floor_pair(grid, x0, y0, size, rib_x, y);
+            } else {
+                set_sector_wall_pair(grid, x0, y0, size, rib_x, y);
+            }
         }
     }
 }
@@ -609,9 +776,7 @@ mod tests {
 
     use super::{generate_world, is_walkable};
 
-    fn reachable_from_primary_spawn(
-        world: &super::GeneratedWorld,
-    ) -> HashSet<(i32, i32)> {
+    fn reachable_from_primary_spawn(world: &super::GeneratedWorld) -> HashSet<(i32, i32)> {
         let mut out = HashSet::new();
         let Some(start) = world.player_spawn_cells.first().copied() else {
             return out;
