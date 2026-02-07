@@ -173,6 +173,22 @@ export interface AwardEntry {
   winners: AwardWinner[];
 }
 
+export interface PersistentRankingEntry {
+  name: string;
+  matches: number;
+  wins: number;
+  winRate: number;
+  avgCaptureRatio: number;
+  avgRescues: number;
+  bestScore: number;
+  updatedAtMs: number;
+}
+
+export interface RankingResponse {
+  generatedAtIso: string;
+  entries: PersistentRankingEntry[];
+}
+
 export interface GameSummary {
   reason: GameOverReason;
   durationMs: number;

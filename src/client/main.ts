@@ -7,9 +7,11 @@ import type {
   GameSummary,
   GhostView,
   LobbyPlayer,
+  PersistentRankingEntry,
   PingType,
   PingView,
   PlayerView,
+  RankingResponse,
   RuntimeEvent,
   ServerMessage,
   Snapshot,
@@ -83,6 +85,9 @@ let snapshot: Snapshot | null = null;
 let summary: GameSummary | null = null;
 let lobbyMessage = '';
 let logs: string[] = [];
+let rankingEntries: PersistentRankingEntry[] = [];
+let rankingFetchError = '';
+let rankingLastFetchedAtMs = 0;
 const observedPingIds = new Set<string>();
 let currentMatchSeed = 0;
 let currentMatchStartedAtMs = 0;
@@ -112,6 +117,7 @@ start();
 function start(): void {
   resize();
   connect();
+  void fetchRankingBoard(true);
   wireKeyboard();
   wireTouchControls();
   initSpectatorControls();
@@ -198,6 +204,7 @@ function handleServerMessage(message: ServerMessage): void {
   if (message.type === 'lobby') {
     isHost = message.hostId === sessionId;
     lobbyMessage = message.note ?? '';
+    void fetchRankingBoard();
     renderLobby(message.players, message.running, message.canStart, message.spectatorCount);
     updateStatusPanels();
     return;
@@ -264,6 +271,7 @@ function handleServerMessage(message: ServerMessage): void {
   if (message.type === 'game_over') {
     summary = normalizeSummary(message.summary);
     finalizeReplayLog(summary);
+    void fetchRankingBoard(true);
     playSoundForGameOver(summary.reason);
     showResult();
     updateStatusPanels();
@@ -374,6 +382,58 @@ function finalizeReplayLog(finalSummary: GameSummary): void {
   };
 }
 
+async function fetchRankingBoard(force = false): Promise<void> {
+  const nowMs = Date.now();
+  if (!force && nowMs - rankingLastFetchedAtMs < 15_000) {
+    return;
+  }
+
+  try {
+    const response = await fetch('/api/ranking?limit=8');
+    if (!response.ok) {
+      rankingFetchError = `ランキング取得失敗: ${response.status}`;
+      rerenderLobbyWithLatestRanking();
+      return;
+    }
+    const payload = (await response.json()) as RankingResponse;
+    rankingEntries = Array.isArray(payload.entries) ? payload.entries : [];
+    rankingFetchError = '';
+    rankingLastFetchedAtMs = nowMs;
+    rerenderLobbyWithLatestRanking();
+  } catch {
+    rankingFetchError = 'ランキングAPI未接続';
+    rerenderLobbyWithLatestRanking();
+  }
+}
+
+function rerenderLobbyWithLatestRanking(): void {
+  if (lobby.classList.contains('hidden')) {
+    return;
+  }
+  const container = document.getElementById('ranking-board');
+  if (!container) {
+    return;
+  }
+  container.innerHTML = renderRankingBoard();
+}
+
+function renderRankingBoard(): string {
+  if (rankingEntries.length === 0) {
+    return `<p class=\"muted\">${escapeHtml(rankingFetchError || 'ランキングデータなし')}</p>`;
+  }
+
+  return `
+    <ol>
+      ${rankingEntries
+        .slice(0, 8)
+        .map((entry) => {
+          return `<li>${escapeHtml(entry.name)} - 勝率 ${(entry.winRate * 100).toFixed(1)}% / 平均制覇 ${(entry.avgCaptureRatio * 100).toFixed(1)}% / 最高 ${entry.bestScore}</li>`;
+        })
+        .join('')}
+    </ol>
+  `;
+}
+
 function renderLobby(players: LobbyPlayer[], running: boolean, canStart: boolean, spectatorCount: number): void {
   lobby.classList.remove('hidden');
 
@@ -437,6 +497,9 @@ function renderLobby(players: LobbyPlayer[], running: boolean, canStart: boolean
           })
           .join('')}
       </ul>
+
+      <h2>永続ランキング</h2>
+      <div id="ranking-board">${renderRankingBoard()}</div>
 
       <p class="hint">AI-onlyテスト: 観戦モード + AI人数(2/5など) で開始</p>
       <p class="hint">プレイヤー操作: 方向キー/WASD, 覚醒: Space/E/Enter, ピン: G(注目)/V(危険)/B(救助)</p>

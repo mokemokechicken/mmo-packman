@@ -5,6 +5,13 @@
 - WebSocket endpoint: `/ws`
 - 形式: JSON
 
+## HTTP API
+
+- `GET /api/ranking?limit=10`
+  - 永続ランキング取得
+  - response: `{ generatedAtIso, entries[] }`
+  - `entries[]` は `name, matches, wins, winRate, avgCaptureRatio, avgRescues, bestScore, updatedAtMs`
+
 ## Client -> Server
 
 - `hello`
