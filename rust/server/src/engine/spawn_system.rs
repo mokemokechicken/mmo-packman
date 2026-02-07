@@ -149,6 +149,24 @@ impl GameEngine {
             return Some(anchor);
         }
 
+        let mut global_candidates: Vec<Vec2> = self
+            .world
+            .sectors
+            .iter()
+            .flat_map(|sector| sector.floor_cells.iter().copied())
+            .filter(|cell| {
+                !self.is_cell_occupied_by_other_ghost(cell.x, cell.y, exclude_ghost_idx)
+                    && self.players.iter().all(|player| {
+                        player.view.state == PlayerState::Down
+                            || manhattan(cell.x, cell.y, player.view.x, player.view.y) >= 3
+                    })
+            })
+            .collect();
+        if !global_candidates.is_empty() {
+            let idx = self.rng.pick_index(global_candidates.len());
+            return Some(global_candidates.swap_remove(idx));
+        }
+
         None
     }
 }

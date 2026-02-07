@@ -1,6 +1,7 @@
 import type {
   AwardEntry,
   ClientMessage,
+  Direction,
   Difficulty,
   FruitView,
   GameConfig,
@@ -17,6 +18,11 @@ import type {
   Snapshot,
   WorldInit,
 } from '../shared/types.js';
+import {
+  DIRECTION_VECTORS,
+  PLAYER_BASE_SPEED,
+  PLAYER_CAPTURED_SPEED_MULTIPLIER,
+} from '../shared/constants.js';
 import { findReplayFrameIndex, parseReplayLog, type ReplayFrame, type ReplayLog } from './replay_parser.js';
 
 const canvas = mustElement<HTMLCanvasElement>('game');
@@ -42,6 +48,16 @@ interface InterpolationState {
   updatedAtMs: number;
   durationMs: number;
   lastMoveAtMs: number;
+}
+
+interface LocalPlayerPredictionState {
+  x: number;
+  y: number;
+  dir: Direction;
+  desiredDir: Direction;
+  moveBuffer: number;
+  lastUpdateMs: number;
+  lastSnapshotTick: number;
 }
 
 type SpectatorCameraMode = 'follow' | 'free';
@@ -113,6 +129,7 @@ let spectatorMinimapCanvas: HTMLCanvasElement | null = null;
 let spectatorMinimapCtx: CanvasRenderingContext2D | null = null;
 const playerInterpolation = new Map<string, InterpolationState>();
 const ghostInterpolation = new Map<string, InterpolationState>();
+let localPlayerPrediction: LocalPlayerPredictionState | null = null;
 
 start();
 
@@ -241,6 +258,7 @@ function handleServerMessage(message: ServerMessage): void {
     freeCameraCenter = null;
     playerInterpolation.clear();
     ghostInterpolation.clear();
+    localPlayerPrediction = null;
     dotSet.clear();
     pelletMap.clear();
 
@@ -264,6 +282,7 @@ function handleServerMessage(message: ServerMessage): void {
     }
     const previousSnapshot = snapshot;
     snapshot = normalizeSnapshot(message.snapshot);
+    syncLocalPlayerPredictionFromSnapshot(snapshot);
     syncPingLogs(snapshot.pings);
     playAwakenTransitions(previousSnapshot, snapshot);
     updateInterpolationStates(snapshot);
@@ -770,9 +789,15 @@ function wireKeyboard(): void {
   const pressedDirs: Array<'up' | 'down' | 'left' | 'right'> = [];
 
   const syncDirectionInput = (): void => {
-    const nextDir = pressedDirs.length > 0 ? pressedDirs[pressedDirs.length - 1] : 'none';
+    if (pressedDirs.length === 0) {
+      return;
+    }
+    const nextDir = pressedDirs[pressedDirs.length - 1];
     if (nextDir !== currentDir) {
       currentDir = nextDir;
+      if (localPlayerPrediction) {
+        localPlayerPrediction.desiredDir = nextDir;
+      }
       send({ type: 'input', dir: nextDir });
     }
   };
@@ -846,11 +871,10 @@ function wireKeyboard(): void {
   });
 
   window.addEventListener('blur', () => {
-    if (pressedDirs.length === 0 && currentDir === 'none') {
+    if (pressedDirs.length === 0) {
       return;
     }
     pressedDirs.length = 0;
-    syncDirectionInput();
   });
 }
 
@@ -872,6 +896,10 @@ function wireTouchControls(): void {
 
     const dir = target.getAttribute('data-dir') as 'up' | 'down' | 'left' | 'right' | null;
     if (dir) {
+      currentDir = dir;
+      if (localPlayerPrediction) {
+        localPlayerPrediction.desiredDir = dir;
+      }
       send({ type: 'input', dir });
       return;
     }
@@ -1713,6 +1741,7 @@ function openReplay(log: ReplayLog): void {
   isSpectator = true;
   spectatorCameraMode = 'follow';
   followPlayerId = null;
+  localPlayerPrediction = null;
   updateTouchControlsVisibility();
   world = cloneWorld(log.world);
   result.classList.add('hidden');
@@ -1753,6 +1782,7 @@ function closeReplay(): void {
   updateTouchControlsVisibility();
   playerInterpolation.clear();
   ghostInterpolation.clear();
+  localPlayerPrediction = null;
   updateStatusPanels();
   updateHud();
 }
@@ -1793,6 +1823,7 @@ function draw(): void {
     return;
   }
 
+  updateLocalPlayerPrediction(performance.now());
   const camera = resolveCameraCenter(world, snapshot);
   const centerX = camera.x;
   const centerY = camera.y;
@@ -2057,6 +2088,19 @@ function resolveCameraCenter(worldState: WorldInit, state: Snapshot): { x: numbe
     return clampCameraCenter(worldState, freeCameraCenter.x, freeCameraCenter.y);
   }
 
+  if (!isSpectator) {
+    const me = state.players.find((player) => player.id === meId);
+    if (!me) {
+      return clampCameraCenter(worldState, worldState.width / 2, worldState.height / 2);
+    }
+    const renderPos = getRenderPositionForPlayer(me, worldState, state);
+    const sector = sectorAt(worldState, state, Math.floor(renderPos.x), Math.floor(renderPos.y));
+    if (!sector) {
+      return clampCameraCenter(worldState, renderPos.x + 0.5, renderPos.y + 0.5);
+    }
+    return clampCameraCenter(worldState, sector.x + sector.size / 2, sector.y + sector.size / 2);
+  }
+
   const focus = resolveFocusPlayer(state);
   if (!focus) {
     return clampCameraCenter(worldState, worldState.width / 2, worldState.height / 2);
@@ -2216,7 +2260,7 @@ function drawPlayers(
   nowMs: number,
 ): void {
   for (const player of players) {
-    const renderPos = getInterpolatedPosition(player.id, player.x, player.y, playerInterpolation);
+    const renderPos = getRenderPositionForPlayer(player, worldState, state);
     if (renderPos.x < minX || renderPos.x > maxX || renderPos.y < minY || renderPos.y > maxY) {
       continue;
     }
@@ -2409,6 +2453,232 @@ function getInterpolatedPosition(
     x: item.fromX + (item.toX - item.fromX) * alpha,
     y: item.fromY + (item.toY - item.fromY) * alpha,
   };
+}
+
+function syncLocalPlayerPredictionFromSnapshot(nextSnapshot: Snapshot): void {
+  if (isSpectator || replayPlayback || !world || meId.length === 0) {
+    localPlayerPrediction = null;
+    return;
+  }
+  const me = nextSnapshot.players.find((player) => player.id === meId);
+  if (!me) {
+    localPlayerPrediction = null;
+    return;
+  }
+
+  const nowMs = performance.now();
+  const desiredDir = currentDir !== 'none' ? currentDir : me.dir;
+  if (!localPlayerPrediction) {
+    localPlayerPrediction = {
+      x: me.x,
+      y: me.y,
+      dir: me.dir,
+      desiredDir,
+      moveBuffer: 0,
+      lastUpdateMs: nowMs,
+      lastSnapshotTick: nextSnapshot.tick,
+    };
+    return;
+  }
+
+  localPlayerPrediction.desiredDir = desiredDir;
+  localPlayerPrediction.lastUpdateMs = nowMs;
+  localPlayerPrediction.lastSnapshotTick = nextSnapshot.tick;
+
+  const drift = Math.abs(localPlayerPrediction.x - me.x) + Math.abs(localPlayerPrediction.y - me.y);
+  const shouldHardSnap = drift >= 2 || me.state === 'down';
+  if (shouldHardSnap) {
+    localPlayerPrediction.x = me.x;
+    localPlayerPrediction.y = me.y;
+    localPlayerPrediction.dir = me.dir;
+    localPlayerPrediction.moveBuffer = 0;
+    return;
+  }
+
+  // Keep local phase when the server is only 0-1 cell away to avoid oscillation.
+  if (drift === 1 && me.dir === 'none' && desiredDir === 'none') {
+    localPlayerPrediction.x = me.x;
+    localPlayerPrediction.y = me.y;
+    localPlayerPrediction.dir = me.dir;
+    localPlayerPrediction.moveBuffer = 0;
+  }
+}
+
+function updateLocalPlayerPrediction(nowMs: number): void {
+  if (!world || !snapshot || isSpectator || replayPlayback || !localPlayerPrediction) {
+    return;
+  }
+  const me = snapshot.players.find((player) => player.id === meId);
+  if (!me) {
+    localPlayerPrediction = null;
+    return;
+  }
+
+  if (me.state === 'down') {
+    localPlayerPrediction.x = me.x;
+    localPlayerPrediction.y = me.y;
+    localPlayerPrediction.dir = 'none';
+    localPlayerPrediction.moveBuffer = 0;
+    localPlayerPrediction.lastUpdateMs = nowMs;
+    return;
+  }
+
+  const dtSec = clampNumber((nowMs - localPlayerPrediction.lastUpdateMs) / 1000, 0, 0.1);
+  localPlayerPrediction.lastUpdateMs = nowMs;
+  localPlayerPrediction.desiredDir = currentDir !== 'none' ? currentDir : localPlayerPrediction.desiredDir;
+  localPlayerPrediction.moveBuffer += resolvePredictedPlayerSpeed(me, localPlayerPrediction.x, localPlayerPrediction.y) * dtSec;
+
+  let safety = 0;
+  while (localPlayerPrediction.moveBuffer >= 1 && safety < 6) {
+    localPlayerPrediction.moveBuffer -= 1;
+    safety += 1;
+
+    const nextDir = resolveStepDirectionForPosition(
+      localPlayerPrediction.x,
+      localPlayerPrediction.y,
+      localPlayerPrediction.desiredDir,
+      localPlayerPrediction.dir,
+      world,
+      snapshot.gates,
+    );
+    if (nextDir === 'none') {
+      localPlayerPrediction.dir = 'none';
+      localPlayerPrediction.moveBuffer = 0;
+      break;
+    }
+
+    const vector = DIRECTION_VECTORS[nextDir];
+    localPlayerPrediction.x += vector.x;
+    localPlayerPrediction.y += vector.y;
+    localPlayerPrediction.dir = nextDir;
+  }
+}
+
+function getRenderPositionForPlayer(player: PlayerView, worldState: WorldInit, state: Snapshot): { x: number; y: number } {
+  if (player.id === meId && !isSpectator && !replayPlayback) {
+    const predicted = getLocalPlayerRenderPosition(worldState, state);
+    if (predicted) {
+      return predicted;
+    }
+  }
+  return getInterpolatedPosition(player.id, player.x, player.y, playerInterpolation);
+}
+
+function getLocalPlayerRenderPosition(worldState: WorldInit, state: Snapshot): { x: number; y: number } | null {
+  if (!localPlayerPrediction) {
+    return null;
+  }
+  const me = state.players.find((player) => player.id === meId);
+  if (!me) {
+    return null;
+  }
+  if (me.state === 'down') {
+    return { x: me.x, y: me.y };
+  }
+
+  const nextDir = resolveStepDirectionForPosition(
+    localPlayerPrediction.x,
+    localPlayerPrediction.y,
+    localPlayerPrediction.desiredDir,
+    localPlayerPrediction.dir,
+    worldState,
+    state.gates,
+  );
+  if (nextDir === 'none') {
+    return { x: localPlayerPrediction.x, y: localPlayerPrediction.y };
+  }
+
+  const vector = DIRECTION_VECTORS[nextDir];
+  const progress = clampNumber(localPlayerPrediction.moveBuffer, 0, 0.999);
+  return {
+    x: localPlayerPrediction.x + vector.x * progress,
+    y: localPlayerPrediction.y + vector.y * progress,
+  };
+}
+
+function resolvePredictedPlayerSpeed(player: PlayerView, atX: number, atY: number): number {
+  if (!world || !snapshot) {
+    return PLAYER_BASE_SPEED;
+  }
+
+  let speed = PLAYER_BASE_SPEED;
+  const playerCount = snapshot.players.length;
+  if (playerCount >= 80 && playerCount <= 100) {
+    speed *= 1.5;
+  } else if (playerCount === 5 && config?.difficulty === 'casual' && snapshot.captureRatio >= 0.4) {
+    speed *= 1.12;
+  }
+
+  const sector = sectorAt(world, snapshot, atX, atY);
+  if (sector?.captured) {
+    speed *= PLAYER_CAPTURED_SPEED_MULTIPLIER;
+  }
+  if (snapshot.nowMs < player.speedBuffUntil) {
+    speed *= 1.3;
+  }
+  return speed;
+}
+
+function resolveStepDirectionForPosition(
+  fromX: number,
+  fromY: number,
+  desiredDir: Direction,
+  currentDir: Direction,
+  worldState: WorldInit,
+  gates: Snapshot['gates'],
+): Direction {
+  if (desiredDir !== 'none') {
+    const desired = DIRECTION_VECTORS[desiredDir];
+    const dx = fromX + desired.x;
+    const dy = fromY + desired.y;
+    if (canMoveBetweenCells(worldState, gates, fromX, fromY, dx, dy)) {
+      return desiredDir;
+    }
+  }
+
+  if (currentDir !== 'none') {
+    const current = DIRECTION_VECTORS[currentDir];
+    const cx = fromX + current.x;
+    const cy = fromY + current.y;
+    if (canMoveBetweenCells(worldState, gates, fromX, fromY, cx, cy)) {
+      return currentDir;
+    }
+  }
+  return 'none';
+}
+
+function canMoveBetweenCells(
+  worldState: WorldInit,
+  gates: Snapshot['gates'],
+  fromX: number,
+  fromY: number,
+  toX: number,
+  toY: number,
+): boolean {
+  if (!isWalkableTile(worldState, toX, toY)) {
+    return false;
+  }
+
+  for (const gate of gates) {
+    if (gate.open) {
+      continue;
+    }
+    const crossesClosedGate =
+      (gate.a.x === fromX && gate.a.y === fromY && gate.b.x === toX && gate.b.y === toY)
+      || (gate.b.x === fromX && gate.b.y === fromY && gate.a.x === toX && gate.a.y === toY);
+    if (crossesClosedGate) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isWalkableTile(worldState: WorldInit, x: number, y: number): boolean {
+  if (x < 0 || y < 0 || x >= worldState.width || y >= worldState.height) {
+    return false;
+  }
+  const row = worldState.tiles[y];
+  return typeof row === 'string' && row[x] === '.';
 }
 
 function sectorAt(worldState: WorldInit, state: Snapshot, x: number, y: number) {

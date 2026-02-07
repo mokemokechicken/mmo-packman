@@ -386,6 +386,8 @@ fn carve_sector(
         set_sector_floor(grid, x0, y0, size, center + offset, 1);
         set_sector_floor(grid, x0, y0, size, center + offset, size - 2);
     }
+
+    reduce_sector_dead_ends(grid, x0, y0, size, rng);
 }
 
 fn set_sector_floor(
@@ -471,6 +473,66 @@ fn apply_sector_ribs(
             }
         }
     }
+}
+
+fn reduce_sector_dead_ends(grid: &mut [Vec<char>], x0: i32, y0: i32, size: i32, rng: &mut Rng) {
+    for _ in 0..8 {
+        let mut changed = false;
+
+        for local_y in 1..(size - 1) {
+            for local_x in 1..(size - 1) {
+                if !is_sector_floor(grid, x0, y0, local_x, local_y) {
+                    continue;
+                }
+
+                let mut open_neighbors = 0;
+                for (dx, dy) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+                    if is_sector_floor(grid, x0, y0, local_x + dx, local_y + dy) {
+                        open_neighbors += 1;
+                    }
+                }
+                if open_neighbors >= 2 {
+                    continue;
+                }
+
+                let mut candidates = Vec::new();
+                for (dx, dy) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+                    let nx = local_x + dx;
+                    let ny = local_y + dy;
+                    if nx <= 0 || ny <= 0 || nx >= size - 1 || ny >= size - 1 {
+                        continue;
+                    }
+                    if is_sector_floor(grid, x0, y0, nx, ny) {
+                        continue;
+                    }
+                    candidates.push((nx, ny));
+                }
+
+                if candidates.is_empty() {
+                    continue;
+                }
+                let (open_x, open_y) = candidates[rng.pick_index(candidates.len())];
+                set_sector_floor_pair(grid, x0, y0, size, open_x, open_y);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn is_sector_floor(grid: &[Vec<char>], x0: i32, y0: i32, local_x: i32, local_y: i32) -> bool {
+    if local_x <= 0 || local_y <= 0 {
+        return false;
+    }
+    let gx = x0 + local_x;
+    let gy = y0 + local_y;
+    let Some(row) = grid.get(gy as usize) else {
+        return false;
+    };
+    row.get(gx as usize).copied() == Some('.')
 }
 
 fn connect_right(grid: &mut [Vec<char>], row: i32, col: i32, side: i32) -> GateState {
@@ -774,7 +836,7 @@ mod tests {
 
     use crate::constants::SECTOR_SIZE;
 
-    use super::{generate_world, is_walkable};
+    use super::{build_gate_switch_cell_set, generate_world, is_walkable};
 
     fn reachable_from_primary_spawn(world: &super::GeneratedWorld) -> HashSet<(i32, i32)> {
         let mut out = HashSet::new();
@@ -905,6 +967,45 @@ mod tests {
                     pellet.x,
                     pellet.y
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn sector_interior_avoids_dead_ends() {
+        for seed in 0..160u32 {
+            let world = generate_world(10, seed);
+            let gate_cells = build_gate_switch_cell_set(&world.gates);
+
+            for sector in &world.sectors {
+                let x_min = sector.view.x + 2;
+                let x_max = sector.view.x + sector.view.size - 3;
+                let y_min = sector.view.y + 2;
+                let y_max = sector.view.y + sector.view.size - 3;
+
+                for y in y_min..=y_max {
+                    for x in x_min..=x_max {
+                        if !is_walkable(&world, x, y) {
+                            continue;
+                        }
+                        if gate_cells.contains(&(x, y)) {
+                            continue;
+                        }
+
+                        let mut neighbors = 0;
+                        for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                            if is_walkable(&world, nx, ny) {
+                                neighbors += 1;
+                            }
+                        }
+
+                        assert!(
+                            neighbors >= 2,
+                            "dead-end interior cell: seed={seed}, pos=({x},{y}), sector={}",
+                            sector.view.id
+                        );
+                    }
+                }
             }
         }
     }
