@@ -6,9 +6,11 @@
 
 ```bash
 npm install
+npm run start
 npm run dev
 ```
 
+- Rust runtime start: `npm run start`
 - Client preview: `http://localhost:5173`
 - Rust simulator: `npm run simulate -- --single --ai 5 --minutes 3 --difficulty normal`
 
@@ -18,6 +20,7 @@ npm run dev
 ## スクリプト
 
 - `npm run dev` クライアント開発サーバー起動（Vite）
+- `npm run start` Rust実装ランタイム起動（既定シナリオ）
 - `npm run check` 型チェック
 - `npm run build` 本番ビルド
 - `npm run test` Node 側の自己テスト

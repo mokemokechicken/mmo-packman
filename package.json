@@ -23,7 +23,8 @@
     "simulate": "npm run simulate:rust --",
     "simulate:rust": "cargo run --manifest-path rust/server/Cargo.toml --bin simulate --",
     "reference:ts:simulate": "tsx reference/ts-server/src/server/simulate.ts",
-    "start": "echo \"Rust WebSocket server is not implemented yet. Use simulator commands for now.\" && exit 1"
+    "start": "npm run start:rust",
+    "start:rust": "npm run simulate:rust -- --single --ai 5 --minutes 3 --difficulty normal --seed 12345"
   },
   "dependencies": {
     "express": "^5.1.0",
