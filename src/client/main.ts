@@ -1684,7 +1684,7 @@ function draw(): void {
 
       if (row[x] === '#') {
         if (!discovered) {
-          ctx.fillStyle = '#090b12';
+          ctx.fillStyle = '#0d0f17';
         } else if (sector?.captured) {
           ctx.fillStyle = '#10293c';
         } else if (sector?.type === 'dark') {
@@ -1799,7 +1799,9 @@ function drawWallOutlines(
       }
 
       const sector = sectorAt(worldState, state, x, y);
-      const discovered = !!sector?.discovered;
+      if (!sector || !sector.discovered) {
+        continue;
+      }
       const sx = originX + x * tileSize;
       const sy = originY + y * tileSize;
       const wallPath = buildWallTilePath(worldState, x, y, sx, sy, tileSize, baseStroke, cornerRadius);
@@ -1807,14 +1809,11 @@ function drawWallOutlines(
         continue;
       }
 
-      if (discovered) {
-        ctx.strokeStyle = wallOutlineOuterColor();
-        ctx.lineWidth = baseStroke * 1.25;
-        ctx.stroke(wallPath);
-      }
-
+      ctx.strokeStyle = wallOutlineOuterColor();
+      ctx.lineWidth = baseStroke * 1.25;
+      ctx.stroke(wallPath);
       ctx.strokeStyle = wallOutlineColor(sector);
-      ctx.lineWidth = discovered ? baseStroke * 0.78 : baseStroke * 0.9;
+      ctx.lineWidth = baseStroke * 0.78;
       ctx.stroke(wallPath);
     }
   }
@@ -1895,10 +1894,7 @@ function isWallTile(worldState: WorldInit, x: number, y: number): boolean {
   return row[x] === '#';
 }
 
-function wallOutlineColor(sector: Snapshot['sectors'][number] | null): string {
-  if (!sector?.discovered) {
-    return 'rgba(77, 92, 130, 0.62)';
-  }
+function wallOutlineColor(sector: Snapshot['sectors'][number]): string {
   if (sector.captured) {
     return '#79d8ff';
   }
