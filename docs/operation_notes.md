@@ -87,6 +87,39 @@ done
 
 - `AI x80`: `maxCapture=25.0, 13.9`（`avgMaxCapture=19.45%`）
 
+## 5人カジュアルのクリア成立性観測（Issue #42）
+
+対象シナリオ:
+
+- `AI x5 / casual / 10分 / seed 4001-4005`
+
+観測指標:
+
+- `victoryCount`: `reason == victory` の件数（目標: 1件以上）
+- `avgMaxCapture`: 代表seed群の平均最大制覇率
+
+仕様メモ:
+
+- issue #42 では 5人カジュアルのみ、終盤支援の係数（掌握・喪失しきい値、維持コスト、敵圧）を調整する。
+
+計測コマンド:
+
+```bash
+for seed in $(seq 4001 4005); do
+  npm run -s simulate -- --single --ai 5 --minutes 10 --difficulty casual --seed "$seed"
+done
+```
+
+最新計測（2026-02-07, issue #42 対応後）:
+
+- `victoryCount=3/5`（seed `4001`, `4002`, `4005`）
+- `avgMaxCapture=85.0%`
+
+参考ベースライン（調整前）:
+
+- `victoryCount=0/5`
+- `avgMaxCapture=25.0%`
+
 ## 既知のMVP制約
 
 - 永続化なし
