@@ -45,6 +45,7 @@
 - `game_over`
   - 勝敗理由
   - ランキング
+  - 表彰（`summary.awards`）
   - タイムライン
 - `error`
   - エラーメッセージ
@@ -61,3 +62,31 @@
 
 - 現在はMVPのためメッセージ署名・暗号化は未実装
 - 本番化時は認証とレート制限を追加する
+
+## `game_over.summary.awards` の形式
+
+```json
+{
+  "awards": [
+    {
+      "id": "rescue_king",
+      "title": "救助王",
+      "metricLabel": "救助数",
+      "value": 7,
+      "winners": [
+        {
+          "playerId": "p1",
+          "name": "P1"
+        }
+      ]
+    }
+  ]
+}
+```
+
+- `id`: `rescue_king | explorer_king | defense_king | ghost_hunter`
+- `metricLabel`: UI 表示向けの指標名
+- `value`: 指標の受賞値（同率受賞時は共通）
+- `winners`: 同率を含む受賞者一覧
+- `awards` は常に配列として送信される（該当なしの場合は `[]`）
+- すべて 0 件のカテゴリは送信対象外（`awards` から除外）

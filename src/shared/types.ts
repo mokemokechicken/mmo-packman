@@ -147,12 +147,26 @@ export interface ScoreEntry {
   captures: number;
 }
 
+export interface AwardWinner {
+  playerId: string;
+  name: string;
+}
+
+export interface AwardEntry {
+  id: 'rescue_king' | 'explorer_king' | 'defense_king' | 'ghost_hunter';
+  title: string;
+  metricLabel: string;
+  value: number;
+  winners: AwardWinner[];
+}
+
 export interface GameSummary {
   reason: GameOverReason;
   durationMs: number;
   captureRatio: number;
   timeline: TimelineEvent[];
   ranking: ScoreEntry[];
+  awards: AwardEntry[];
 }
 
 export type ClientMessage =

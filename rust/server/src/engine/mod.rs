@@ -9,9 +9,9 @@ use crate::constants::{
 };
 use crate::rng::Rng;
 use crate::types::{
-    Difficulty, Direction, FruitView, GameConfig, GameOverReason, GameSummary, GhostType,
-    GhostView, PlayerState, PlayerView, RuntimeEvent, ScoreEntry, Snapshot, StartPlayer,
-    TimelineEvent, Vec2,
+    AwardEntry, AwardId, AwardWinner, Difficulty, Direction, FruitView, GameConfig, GameOverReason,
+    GameSummary, GhostType, GhostView, PlayerState, PlayerView, RuntimeEvent, ScoreEntry, Snapshot,
+    StartPlayer, TimelineEvent, Vec2,
 };
 use crate::world::{
     generate_world, is_gate_cell_or_switch, is_walkable, key_of, to_world_init, GeneratedWorld,
@@ -26,6 +26,87 @@ use self::utils::{
 };
 
 const AUTO_RESPAWN_GRACE_MS: u64 = 2_000;
+
+fn build_awards_from_ranking(ranking: &[ScoreEntry]) -> Vec<AwardEntry> {
+    [
+        collect_award(
+            ranking,
+            AwardId::RescueKing,
+            "救助王",
+            "救助数",
+            metric_rescues,
+        ),
+        collect_award(
+            ranking,
+            AwardId::ExplorerKing,
+            "探索王",
+            "探索ドット数",
+            metric_dots,
+        ),
+        collect_award(
+            ranking,
+            AwardId::DefenseKing,
+            "防衛王",
+            "制覇セクター数",
+            metric_captures,
+        ),
+        collect_award(
+            ranking,
+            AwardId::GhostHunter,
+            "ゴーストハンター",
+            "撃破ゴースト数",
+            metric_ghosts,
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn collect_award(
+    ranking: &[ScoreEntry],
+    id: AwardId,
+    title: &str,
+    metric_label: &str,
+    metric: fn(&ScoreEntry) -> i32,
+) -> Option<AwardEntry> {
+    let max_value = ranking.iter().map(metric).max().unwrap_or(0);
+    if max_value == 0 {
+        return None;
+    }
+    let winners = ranking
+        .iter()
+        .filter(|entry| metric(entry) == max_value)
+        .map(|entry| AwardWinner {
+            player_id: entry.player_id.clone(),
+            name: entry.name.clone(),
+        })
+        .collect();
+
+    Some(AwardEntry {
+        id,
+        title: title.to_string(),
+        metric_label: metric_label.to_string(),
+        value: max_value,
+        winners,
+    })
+}
+
+fn metric_dots(entry: &ScoreEntry) -> i32 {
+    entry.dots
+}
+
+fn metric_ghosts(entry: &ScoreEntry) -> i32 {
+    entry.ghosts
+}
+
+fn metric_rescues(entry: &ScoreEntry) -> i32 {
+    entry.rescues
+}
+
+fn metric_captures(entry: &ScoreEntry) -> i32 {
+    entry.captures
+}
 
 #[derive(Clone, Debug, Default)]
 struct PlayerStats {
@@ -280,6 +361,7 @@ impl GameEngine {
             })
             .collect();
         ranking.sort_by(|a, b| b.score.cmp(&a.score));
+        let awards = build_awards_from_ranking(&ranking);
 
         GameSummary {
             reason: self.end_reason.unwrap_or(GameOverReason::Timeout),
@@ -287,6 +369,7 @@ impl GameEngine {
             capture_ratio: self.capture_ratio(),
             timeline: self.timeline.clone(),
             ranking,
+            awards,
         }
     }
 
@@ -832,7 +915,8 @@ mod tests {
     use crate::engine::{GameEngine, GameEngineOptions};
     use crate::rng::Rng;
     use crate::types::{
-        Difficulty, Direction, GateState, PlayerState, RuntimeEvent, StartPlayer, Vec2,
+        AwardId, Difficulty, Direction, GateState, PlayerState, RuntimeEvent, ScoreEntry,
+        StartPlayer, Vec2,
     };
 
     fn make_players(count: usize) -> Vec<StartPlayer> {
@@ -879,6 +963,100 @@ mod tests {
             }
         }
         panic!("expected at least one walkable neighbor");
+    }
+
+    fn score_entry(
+        id: &str,
+        name: &str,
+        score: i32,
+        dots: i32,
+        ghosts: i32,
+        rescues: i32,
+        captures: i32,
+    ) -> ScoreEntry {
+        ScoreEntry {
+            player_id: id.to_string(),
+            name: name.to_string(),
+            score,
+            dots,
+            ghosts,
+            rescues,
+            captures,
+        }
+    }
+
+    fn award_by_id(awards: &[crate::types::AwardEntry], id: AwardId) -> &crate::types::AwardEntry {
+        awards
+            .iter()
+            .find(|award| award.id == id)
+            .expect("award exists")
+    }
+
+    #[test]
+    fn awards_choose_top_metric_and_allow_ties() {
+        let ranking = vec![
+            score_entry("p1", "P1", 1200, 40, 3, 6, 4),
+            score_entry("p2", "P2", 900, 45, 2, 6, 5),
+            score_entry("p3", "P3", 800, 20, 4, 1, 1),
+        ];
+
+        let awards = super::build_awards_from_ranking(&ranking);
+        assert_eq!(awards.len(), 4);
+
+        let rescue = award_by_id(&awards, AwardId::RescueKing);
+        assert_eq!(rescue.value, 6);
+        assert_eq!(rescue.winners.len(), 2);
+        assert!(rescue.winners.iter().any(|winner| winner.player_id == "p1"));
+        assert!(rescue.winners.iter().any(|winner| winner.player_id == "p2"));
+
+        let explorer = award_by_id(&awards, AwardId::ExplorerKing);
+        assert_eq!(explorer.value, 45);
+        assert_eq!(explorer.winners.len(), 1);
+        assert_eq!(explorer.winners[0].player_id, "p2");
+
+        let defense = award_by_id(&awards, AwardId::DefenseKing);
+        assert_eq!(defense.value, 5);
+        assert_eq!(defense.winners.len(), 1);
+        assert_eq!(defense.winners[0].player_id, "p2");
+
+        let hunter = award_by_id(&awards, AwardId::GhostHunter);
+        assert_eq!(hunter.value, 4);
+        assert_eq!(hunter.winners.len(), 1);
+        assert_eq!(hunter.winners[0].player_id, "p3");
+    }
+
+    #[test]
+    fn awards_skip_zero_only_categories() {
+        let ranking = vec![
+            score_entry("p1", "P1", 100, 0, 0, 0, 0),
+            score_entry("p2", "P2", 90, 0, 0, 0, 0),
+        ];
+
+        let awards = super::build_awards_from_ranking(&ranking);
+        assert!(awards.is_empty());
+    }
+
+    #[test]
+    fn awards_exclude_zero_category_in_mixed_case() {
+        let ranking = vec![
+            score_entry("p1", "P1", 300, 12, 0, 0, 1),
+            score_entry("p2", "P2", 280, 9, 0, 0, 2),
+        ];
+
+        let awards = super::build_awards_from_ranking(&ranking);
+        assert_eq!(awards.len(), 2);
+        assert!(awards
+            .iter()
+            .any(|award| matches!(award.id, AwardId::ExplorerKing)));
+        assert!(awards
+            .iter()
+            .any(|award| matches!(award.id, AwardId::DefenseKing)));
+        assert!(!awards
+            .iter()
+            .any(|award| matches!(award.id, AwardId::RescueKing)));
+        assert!(!awards
+            .iter()
+            .any(|award| matches!(award.id, AwardId::GhostHunter)));
     }
 
     #[test]
@@ -1381,7 +1559,11 @@ mod tests {
             1.5,
             0.0001
         ));
-        assert!(approx_eq(large.large_party_regen_relief_factor(), 0.05, 0.0001));
+        assert!(approx_eq(
+            large.large_party_regen_relief_factor(),
+            0.05,
+            0.0001
+        ));
         assert_eq!(
             large.large_party_ghost_target_profile(),
             (0.2, 0.45, 0.2, 0.6)
@@ -1443,7 +1625,11 @@ mod tests {
             1.0,
             0.0001
         ));
-        assert!(approx_eq(small.large_party_regen_relief_factor(), 1.0, 0.0001));
+        assert!(approx_eq(
+            small.large_party_regen_relief_factor(),
+            1.0,
+            0.0001
+        ));
         assert_eq!(
             small.large_party_ghost_target_profile(),
             (0.5, 1.0, 0.7, 1.0)
@@ -1620,9 +1806,9 @@ mod tests {
         engine.update_sector_control(TICK_MS, engine.started_at_ms + TICK_MS);
 
         assert!(!engine.world.sectors[sector_id].view.captured);
-        let lost_event = engine.events.iter().any(|event| {
-            matches!(event, RuntimeEvent::SectorLost { sector_id: id } if *id == sector_id)
-        });
+        let lost_event = engine.events.iter().any(
+            |event| matches!(event, RuntimeEvent::SectorLost { sector_id: id } if *id == sector_id),
+        );
         assert!(lost_event);
     }
 

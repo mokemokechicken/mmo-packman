@@ -1,4 +1,5 @@
 import type {
+  AwardEntry,
   ClientMessage,
   Difficulty,
   FruitView,
@@ -192,7 +193,7 @@ function handleServerMessage(message: ServerMessage): void {
   }
 
   if (message.type === 'game_over') {
-    summary = message.summary;
+    summary = normalizeSummary(message.summary);
     showResult();
     updateStatusPanels();
     return;
@@ -361,6 +362,7 @@ function showResult(): void {
   }
 
   result.classList.remove('hidden');
+  const awards = renderAwards(summary.awards);
   const ranking = summary.ranking
     .slice(0, 8)
     .map((entry, index) => {
@@ -372,6 +374,8 @@ function showResult(): void {
     <div class="panel">
       <h2>ゲーム終了: ${summary.reason}</h2>
       <p>制覇率: ${(summary.captureRatio * 100).toFixed(1)}%</p>
+      <h3>表彰</h3>
+      ${awards}
       <h3>ランキング</h3>
       <ol>${ranking}</ol>
       <h3>タイムライン</h3>
@@ -384,6 +388,30 @@ function showResult(): void {
   close?.addEventListener('click', () => {
     result.classList.add('hidden');
   });
+}
+
+function normalizeSummary(raw: GameSummary): GameSummary {
+  return {
+    ...raw,
+    awards: raw.awards ?? [],
+  };
+}
+
+function renderAwards(awards: AwardEntry[]): string {
+  if (awards.length === 0) {
+    return '<p class="muted">該当する表彰はありません。</p>';
+  }
+
+  return `
+    <ul>
+      ${awards
+        .map((award) => {
+          const winnerNames = award.winners.map((winner) => escapeHtml(winner.name)).join(', ');
+          return `<li><strong>${escapeHtml(award.title)}</strong> (${escapeHtml(award.metricLabel)}: ${award.value}) - ${winnerNames}</li>`;
+        })
+        .join('')}
+    </ul>
+  `;
 }
 
 function wireKeyboard(): void {

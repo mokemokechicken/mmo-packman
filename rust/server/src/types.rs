@@ -306,6 +306,32 @@ pub struct ScoreEntry {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct AwardWinner {
+    #[serde(rename = "playerId")]
+    pub player_id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AwardId {
+    RescueKing,
+    ExplorerKing,
+    DefenseKing,
+    GhostHunter,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AwardEntry {
+    pub id: AwardId,
+    pub title: String,
+    #[serde(rename = "metricLabel")]
+    pub metric_label: String,
+    pub value: i32,
+    pub winners: Vec<AwardWinner>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct GameSummary {
     pub reason: GameOverReason,
     #[serde(rename = "durationMs")]
@@ -314,6 +340,7 @@ pub struct GameSummary {
     pub capture_ratio: f32,
     pub timeline: Vec<TimelineEvent>,
     pub ranking: Vec<ScoreEntry>,
+    pub awards: Vec<AwardEntry>,
 }
 
 #[derive(Clone, Debug)]
