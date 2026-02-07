@@ -107,6 +107,35 @@ body {
   width: 280px;
 }
 
+#audio-settings {
+  right: 342px;
+  bottom: 12px;
+  width: min(320px, calc(100vw - 354px));
+  padding: 10px;
+}
+
+#audio-settings .sound-title {
+  font-size: 12px;
+  color: #bdd4ff;
+  margin-bottom: 6px;
+}
+
+#audio-settings .sound-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+#audio-settings .sound-row input[type='checkbox'] {
+  width: auto;
+  margin: 0;
+}
+
+#audio-settings input[type='range'] {
+  margin-top: 6px;
+}
+
 #spectator-controls .spec-row {
   display: flex;
   align-items: center;
@@ -256,6 +285,12 @@ button:disabled {
     top: 90px;
     left: 8px;
     width: min(300px, 92vw);
+  }
+
+  #audio-settings {
+    right: 8px;
+    bottom: 8px;
+    width: min(320px, 92vw);
   }
 
   #hud {
