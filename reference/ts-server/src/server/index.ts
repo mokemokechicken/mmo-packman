@@ -15,6 +15,7 @@ import type {
 import { GameEngine, type StartPlayer } from './game.js';
 import { PingManager } from './ping_manager.js';
 import { RankingStore } from './ranking_store.js';
+import { buildAoiSnapshot, DEFAULT_AOI_RADIUS_TILES } from './aoi.js';
 
 interface ClientContext {
   id: string;
@@ -68,6 +69,8 @@ const rooms = new Map<string, RoomState>();
 const DIFFICULTIES = new Set<Difficulty>(['casual', 'normal', 'hard', 'nightmare']);
 const MOVE_DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
 const PING_TYPES = new Set<PingType>(['focus', 'danger', 'help']);
+const AOI_ENABLED = process.env.AOI_ENABLED !== '0';
+const AOI_RADIUS_TILES = normalizeAoiRadius(process.env.AOI_RADIUS_TILES, DEFAULT_AOI_RADIUS_TILES);
 
 wss.on('connection', (ws) => {
   const clientId = randomUUID();
@@ -281,7 +284,7 @@ function sendWelcomeAndInitialState(ctx: ClientContext, room: RoomState, member:
 
   send(ctx.ws, {
     type: 'state',
-    snapshot: withPings(room, room.game.buildSnapshot(false)),
+    snapshot: scopedSnapshotForMember(room, member, withPings(room, room.game.buildSnapshot(false))),
   });
 }
 
@@ -385,7 +388,11 @@ function handleLobbyStart(
 
     running.step(TICK_MS);
     const snapshot = withPings(room, running.buildSnapshot(true));
-    broadcast(room, { type: 'state', snapshot });
+    if (AOI_ENABLED) {
+      broadcastState(room, snapshot);
+    } else {
+      broadcast(room, { type: 'state', snapshot });
+    }
 
     if (running.isEnded()) {
       const summary = running.buildSummary();
@@ -491,6 +498,35 @@ function broadcast(room: RoomState, message: ServerMessage): void {
       ctx.ws.send(payload);
     }
   }
+}
+
+function broadcastState(room: RoomState, snapshot: ReturnType<GameEngine['buildSnapshot']>): void {
+  for (const [playerId, clientId] of room.activeClientByPlayerId.entries()) {
+    const ctx = clients.get(clientId);
+    if (!ctx || !ctx.playerId || ctx.roomId !== room.id) {
+      continue;
+    }
+    if (ctx.ws.readyState !== ctx.ws.OPEN) {
+      continue;
+    }
+    const member = room.lobbyPlayers.get(playerId);
+    if (!member) {
+      continue;
+    }
+    const scoped = scopedSnapshotForMember(room, member, snapshot);
+    send(ctx.ws, { type: 'state', snapshot: scoped });
+  }
+}
+
+function scopedSnapshotForMember(
+  room: RoomState,
+  member: LobbyPlayerInternal,
+  snapshot: ReturnType<GameEngine['buildSnapshot']>,
+): ReturnType<GameEngine['buildSnapshot']> {
+  if (!AOI_ENABLED) {
+    return snapshot;
+  }
+  return buildAoiSnapshot(snapshot, member.id, member.spectator, AOI_RADIUS_TILES);
 }
 
 function send(ws: WebSocket, message: ServerMessage): void {
@@ -685,6 +721,14 @@ function normalizeTimeLimitMs(value: number | undefined): number | undefined {
   }
   const minutes = Math.max(1, Math.min(10, Math.floor(value)));
   return minutes * 60_000;
+}
+
+function normalizeAoiRadius(raw: string | undefined, fallback: number): number {
+  const parsed = Number(raw ?? fallback);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return Math.floor(parsed);
 }
 
 function bindClientToPlayer(ctx: ClientContext, room: RoomState, member: LobbyPlayerInternal): void {

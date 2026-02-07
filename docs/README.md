@@ -13,6 +13,7 @@
 - [サーバー/クライアント通信プロトコル](./server_protocol.md)
 - [AI-only テストプレイ手順](./ai_test_play.md)
 - [タイムラプスリプレイ手順](./replay_timelapse.md)
+- [AOI差分同期メトリクス](./aoi_metrics.md)
 - [Rust サーバー再実装メモ](./rust_server_reimplementation.md)
 - [TypeScript サーバー参考実装の退避メモ](./ts_server_archive.md)
 - [Cloud Run デプロイ手順](./deployment_cloud_run.md)
