@@ -1683,7 +1683,15 @@ function draw(): void {
       const discovered = !!sector?.discovered;
 
       if (row[x] === '#') {
-        ctx.fillStyle = discovered ? '#2d4a8a' : '#0d0f17';
+        if (!discovered) {
+          ctx.fillStyle = '#090b12';
+        } else if (sector?.captured) {
+          ctx.fillStyle = '#10293c';
+        } else if (sector?.type === 'dark') {
+          ctx.fillStyle = '#101524';
+        } else {
+          ctx.fillStyle = '#0b1120';
+        }
         ctx.fillRect(sx, sy, tileSize, tileSize);
       } else {
         if (!discovered) {
@@ -1703,6 +1711,7 @@ function draw(): void {
       }
     }
   }
+  drawWallOutlines(world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY);
 
   ctx.fillStyle = '#ffd66a';
   for (const key of dotSet) {
@@ -1762,6 +1771,145 @@ function draw(): void {
   );
   drawPings(snapshot.pings, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY, snapshot.nowMs);
   drawSpectatorMinimap(world, snapshot, minX, minY, maxX, maxY);
+}
+
+function drawWallOutlines(
+  worldState: WorldInit,
+  state: Snapshot,
+  originX: number,
+  originY: number,
+  tileSize: number,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+): void {
+  const baseStroke = clampNumber(tileSize * 0.2, 1.4, 7.5);
+  const cornerRadius = clampNumber(tileSize * 0.22, 1.4, tileSize * 0.36);
+
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  for (let y = minY; y <= maxY; y += 1) {
+    const row = worldState.tiles[y] as string;
+    for (let x = minX; x <= maxX; x += 1) {
+      if (row[x] !== '#') {
+        continue;
+      }
+
+      const sector = sectorAt(worldState, state, x, y);
+      const discovered = !!sector?.discovered;
+      const sx = originX + x * tileSize;
+      const sy = originY + y * tileSize;
+      const wallPath = buildWallTilePath(worldState, x, y, sx, sy, tileSize, baseStroke, cornerRadius);
+      if (!wallPath) {
+        continue;
+      }
+
+      if (discovered) {
+        ctx.strokeStyle = wallOutlineOuterColor();
+        ctx.lineWidth = baseStroke * 1.25;
+        ctx.stroke(wallPath);
+      }
+
+      ctx.strokeStyle = wallOutlineColor(sector);
+      ctx.lineWidth = discovered ? baseStroke * 0.78 : baseStroke * 0.9;
+      ctx.stroke(wallPath);
+    }
+  }
+
+  ctx.restore();
+}
+
+function buildWallTilePath(
+  worldState: WorldInit,
+  x: number,
+  y: number,
+  sx: number,
+  sy: number,
+  tileSize: number,
+  strokeWidth: number,
+  cornerRadius: number,
+): Path2D | null {
+  const topOpen = !isWallTile(worldState, x, y - 1);
+  const rightOpen = !isWallTile(worldState, x + 1, y);
+  const bottomOpen = !isWallTile(worldState, x, y + 1);
+  const leftOpen = !isWallTile(worldState, x - 1, y);
+  if (!topOpen && !rightOpen && !bottomOpen && !leftOpen) {
+    return null;
+  }
+
+  const inset = strokeWidth * 0.5 + 0.9;
+  const left = sx + (leftOpen ? inset : 0);
+  const right = sx + tileSize - (rightOpen ? inset : 0);
+  const top = sy + (topOpen ? inset : 0);
+  const bottom = sy + tileSize - (bottomOpen ? inset : 0);
+  const radius = Math.min(cornerRadius, Math.max(1.2, (right - left) * 0.5), Math.max(1.2, (bottom - top) * 0.5));
+
+  const path = new Path2D();
+  if (topOpen) {
+    path.moveTo(left + (leftOpen ? radius : 0), top);
+    path.lineTo(right - (rightOpen ? radius : 0), top);
+  }
+  if (rightOpen) {
+    path.moveTo(right, top + (topOpen ? radius : 0));
+    path.lineTo(right, bottom - (bottomOpen ? radius : 0));
+  }
+  if (bottomOpen) {
+    path.moveTo(right - (rightOpen ? radius : 0), bottom);
+    path.lineTo(left + (leftOpen ? radius : 0), bottom);
+  }
+  if (leftOpen) {
+    path.moveTo(left, bottom - (bottomOpen ? radius : 0));
+    path.lineTo(left, top + (topOpen ? radius : 0));
+  }
+
+  if (topOpen && rightOpen) {
+    path.moveTo(right - radius, top);
+    path.arc(right - radius, top + radius, radius, -Math.PI / 2, 0);
+  }
+  if (rightOpen && bottomOpen) {
+    path.moveTo(right, bottom - radius);
+    path.arc(right - radius, bottom - radius, radius, 0, Math.PI / 2);
+  }
+  if (bottomOpen && leftOpen) {
+    path.moveTo(left + radius, bottom);
+    path.arc(left + radius, bottom - radius, radius, Math.PI / 2, Math.PI);
+  }
+  if (leftOpen && topOpen) {
+    path.moveTo(left, top + radius);
+    path.arc(left + radius, top + radius, radius, Math.PI, Math.PI * 1.5);
+  }
+  return path;
+}
+
+function isWallTile(worldState: WorldInit, x: number, y: number): boolean {
+  if (x < 0 || y < 0 || x >= worldState.width || y >= worldState.height) {
+    return false;
+  }
+  const row = worldState.tiles[y];
+  if (!row) {
+    return false;
+  }
+  return row[x] === '#';
+}
+
+function wallOutlineColor(sector: Snapshot['sectors'][number] | null): string {
+  if (!sector?.discovered) {
+    return 'rgba(77, 92, 130, 0.62)';
+  }
+  if (sector.captured) {
+    return '#79d8ff';
+  }
+  if (sector.type === 'dark') {
+    return '#5f8dbf';
+  }
+  return '#7bb8ff';
+}
+
+function wallOutlineOuterColor(): string {
+  return 'rgba(11, 24, 52, 0.86)';
 }
 
 function resolveCameraCenter(worldState: WorldInit, state: Snapshot): { x: number; y: number } {
