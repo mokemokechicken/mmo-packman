@@ -1239,7 +1239,16 @@ function resolveFocusPlayer(state: Snapshot): PlayerView | null {
   if (!followPlayerId) {
     return [...members].sort((a, b) => b.score - a.score)[0] ?? null;
   }
-  return members.find((player) => player.id === followPlayerId) ?? null;
+  const followed = members.find((player) => player.id === followPlayerId);
+  if (followed) {
+    return followed;
+  }
+
+  const fallback = [...members].sort((a, b) => b.score - a.score)[0] ?? null;
+  if (spectatorCameraMode === 'follow') {
+    followPlayerId = fallback?.id ?? null;
+  }
+  return fallback;
 }
 
 function drawGates(
