@@ -256,6 +256,7 @@ impl GameEngine {
             milestone_emitted: HashSet::new(),
             next_id_counter: 1,
         };
+        engine.update_discovered_sectors_by_players();
         engine.spawn_initial_ghosts();
         engine
     }
@@ -335,6 +336,7 @@ impl GameEngine {
             .map(|ghost| (ghost.view.id.clone(), (ghost.view.x, ghost.view.y)))
             .collect();
         self.update_players(dt_ms, now_ms);
+        self.update_discovered_sectors_by_players();
         self.update_ghosts(dt_ms, now_ms);
         self.resolve_ghost_collisions(
             now_ms,
@@ -347,6 +349,21 @@ impl GameEngine {
             self.emit_progress_milestones();
         }
         self.check_game_over(now_ms);
+    }
+
+    fn update_discovered_sectors_by_players(&mut self) {
+        let positions: Vec<(i32, i32)> = self
+            .players
+            .iter()
+            .map(|player| (player.view.x, player.view.y))
+            .collect();
+        for (x, y) in positions {
+            if let Some(sector_id) = self.get_sector_id(x, y) {
+                if let Some(sector) = self.world.sectors.get_mut(sector_id) {
+                    sector.view.discovered = true;
+                }
+            }
+        }
     }
 
     pub fn build_snapshot(&mut self, include_events: bool) -> Snapshot {
@@ -1277,6 +1294,33 @@ mod tests {
         let second = engine.build_snapshot(true);
         assert_eq!(first.events.len(), 1);
         assert_eq!(second.events.len(), 0);
+    }
+
+    #[test]
+    fn initial_player_sector_is_discovered() {
+        let mut engine = GameEngine::new(
+            make_players(2),
+            Difficulty::Normal,
+            334,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        let snapshot = engine.build_snapshot(false);
+
+        for player in &snapshot.players {
+            let sector_id = engine
+                .get_sector_id(player.x, player.y)
+                .expect("player should be inside a sector");
+            assert!(
+                snapshot
+                    .sectors
+                    .get(sector_id)
+                    .map(|sector| sector.discovered)
+                    .unwrap_or(false),
+                "player sector should be discovered at game start"
+            );
+        }
     }
 
     #[test]
