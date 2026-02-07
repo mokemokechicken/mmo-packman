@@ -26,6 +26,7 @@ use self::utils::{
 };
 
 const AUTO_RESPAWN_GRACE_MS: u64 = 2_000;
+const INITIAL_SPAWN_GRACE_MS: u64 = 3_000;
 
 fn build_awards_from_ranking(ranking: &[ScoreEntry]) -> Vec<AwardEntry> {
     [
@@ -224,7 +225,7 @@ impl GameEngine {
                 spawn,
                 reconnect_token: start.reconnect_token.clone(),
                 awaken_requested: false,
-                remote_revive_grace_until: 0,
+                remote_revive_grace_until: started_at_ms + INITIAL_SPAWN_GRACE_MS,
                 ai_think_at: rng.int(50, 180) as u64,
                 hold_until_ms: 0,
                 stats: PlayerStats::default(),

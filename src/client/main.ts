@@ -567,16 +567,21 @@ function renderLobby(players: LobbyPlayer[], running: boolean, canStart: boolean
 
   startButton?.addEventListener('click', () => {
     const select = document.getElementById('difficulty-select') as HTMLSelectElement | null;
+    const modeSelect = document.getElementById('mode-select') as HTMLSelectElement | null;
     const aiInput = document.getElementById('ai-count') as HTMLInputElement | null;
     const minutesInput = document.getElementById('test-minutes') as HTMLInputElement | null;
 
     const difficulty = (select?.value as Difficulty) ?? 'normal';
+    preferSpectator = modeSelect?.value === 'spectator';
     requestedAiCount = normalizeNumber(aiInput?.value ?? '', requestedAiCount, 0, 100);
     requestedTestMinutes = normalizeNumber(minutesInput?.value ?? '', requestedTestMinutes, 1, 10);
 
+    localStorage.setItem('mmo-packman-spectator', preferSpectator ? '1' : '0');
     localStorage.setItem('mmo-packman-ai-count', String(requestedAiCount));
     localStorage.setItem('mmo-packman-test-minutes', String(requestedTestMinutes));
 
+    // Ensure mode changes are reflected server-side even when the user presses start directly.
+    sendHello();
     send({
       type: 'lobby_start',
       difficulty,
@@ -868,7 +873,6 @@ function wireKeyboard(): void {
       const nextPressed = pressedDirs.filter((value) => value !== dir);
       pressedDirs.length = 0;
       pressedDirs.push(...nextPressed);
-      syncDirectionInput();
     }
   });
 
@@ -2183,7 +2187,7 @@ function drawGates(
       }
       const sx = originX + sw.x * tileSize + tileSize / 2;
       const sy = originY + sw.y * tileSize + tileSize / 2;
-      circle(sx, sy, Math.max(3, tileSize * 0.16), '#ffcb6b');
+      drawGateSwitchIcon(sx, sy, tileSize);
     }
   }
 }
@@ -2238,7 +2242,7 @@ function drawGhosts(
 
     const sx = originX + renderPos.x * tileSize + tileSize / 2;
     const sy = originY + renderPos.y * tileSize + tileSize / 2;
-    circle(sx, sy, Math.max(4, tileSize * 0.34), ghostColor(ghost.type));
+    drawGhostIcon(sx, sy, tileSize, ghostColor(ghost.type), ghost.type === 'boss');
 
     if (ghost.type === 'boss') {
       ctx.fillStyle = '#ffffff';
@@ -2246,6 +2250,46 @@ function drawGhosts(
       ctx.fillText(`${ghost.hp}`, sx - tileSize * 0.1, sy - tileSize * 0.45);
     }
   }
+}
+
+function drawGateSwitchIcon(x: number, y: number, tileSize: number): void {
+  const outer = Math.max(4, tileSize * 0.22);
+  const inner = Math.max(2, outer * 0.45);
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(Math.PI / 4);
+  ctx.fillStyle = '#ffd16e';
+  ctx.fillRect(-outer, -outer, outer * 2, outer * 2);
+  ctx.fillStyle = '#071321';
+  ctx.fillRect(-inner, -inner, inner * 2, inner * 2);
+  ctx.restore();
+}
+
+function drawGhostIcon(x: number, y: number, tileSize: number, color: string, boss: boolean): void {
+  const outerRadius = Math.max(4.8, tileSize * (boss ? 0.42 : 0.34));
+  const innerRadius = outerRadius * 0.6;
+  const spikes = boss ? 11 : 9;
+
+  ctx.beginPath();
+  for (let i = 0; i < spikes * 2; i += 1) {
+    const angle = (-Math.PI / 2) + (Math.PI * i) / spikes;
+    const radius = i % 2 === 0 ? outerRadius : innerRadius;
+    const px = x + Math.cos(angle) * radius;
+    const py = y + Math.sin(angle) * radius;
+    if (i === 0) {
+      ctx.moveTo(px, py);
+    } else {
+      ctx.lineTo(px, py);
+    }
+  }
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+
+  ctx.lineWidth = boss ? 2.1 : 1.4;
+  ctx.strokeStyle = boss ? '#ffe8b3' : 'rgba(10, 20, 34, 0.9)';
+  ctx.stroke();
 }
 
 function drawPlayers(
