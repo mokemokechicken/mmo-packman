@@ -104,7 +104,7 @@ body {
   left: 12px;
   top: 12px;
   padding: 8px;
-  width: 280px;
+  width: 320px;
 }
 
 #audio-settings {
@@ -140,6 +140,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-bottom: 6px;
 }
 
 #spectator-controls .spec-title {
@@ -151,8 +152,18 @@ body {
 #spectator-controls button {
   margin: 0;
   width: auto;
-  min-width: 44px;
+  min-width: 38px;
   padding: 6px 8px;
+}
+
+#spectator-controls #spectator-mode {
+  flex: 1;
+}
+
+#spectator-controls #spectator-zoom {
+  min-width: 52px;
+  text-align: center;
+  font-size: 12px;
 }
 
 #spectator-target {
@@ -161,6 +172,16 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+#spectator-minimap {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-top: 6px;
+  border: 1px solid rgba(122, 192, 255, 0.4);
+  border-radius: 8px;
+  background: rgba(7, 12, 23, 0.95);
 }
 
 .panel {
@@ -284,7 +305,7 @@ button:disabled {
   #spectator-controls {
     top: 90px;
     left: 8px;
-    width: min(300px, 92vw);
+    width: min(340px, 92vw);
   }
 
   #audio-settings {
