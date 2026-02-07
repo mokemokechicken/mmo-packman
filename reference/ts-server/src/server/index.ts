@@ -20,10 +20,22 @@ interface ClientContext {
   id: string;
   ws: WebSocket;
   playerId: string | null;
+  roomId: string | null;
 }
 
 interface LobbyPlayerInternal extends LobbyPlayer {
   reconnectToken: string;
+}
+
+interface RoomState {
+  id: string;
+  lobbyPlayers: Map<string, LobbyPlayerInternal>;
+  activeClientByPlayerId: Map<string, string>;
+  hostId: string | null;
+  game: GameEngine | null;
+  loop: NodeJS.Timeout | null;
+  runningAiCount: number;
+  pingManager: PingManager;
 }
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -51,14 +63,7 @@ if (fs.existsSync(distClientDir)) {
 }
 
 const clients = new Map<string, ClientContext>();
-const lobbyPlayers = new Map<string, LobbyPlayerInternal>();
-const activeClientByPlayerId = new Map<string, string>();
-
-let hostId: string | null = null;
-let game: GameEngine | null = null;
-let loop: NodeJS.Timeout | null = null;
-let runningAiCount = 0;
-const pingManager = new PingManager();
+const rooms = new Map<string, RoomState>();
 
 const DIFFICULTIES = new Set<Difficulty>(['casual', 'normal', 'hard', 'nightmare']);
 const MOVE_DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
@@ -66,7 +71,7 @@ const PING_TYPES = new Set<PingType>(['focus', 'danger', 'help']);
 
 wss.on('connection', (ws) => {
   const clientId = randomUUID();
-  const ctx: ClientContext = { id: clientId, ws, playerId: null };
+  const ctx: ClientContext = { id: clientId, ws, playerId: null, roomId: null };
   clients.set(clientId, ctx);
 
   ws.on('message', (raw) => {
@@ -77,7 +82,7 @@ wss.on('connection', (ws) => {
     }
 
     if (message.type === 'hello') {
-      handleHello(ctx, message.name, !!message.spectator, message.reconnectToken);
+      handleHello(ctx, message.name, !!message.spectator, message.reconnectToken, message.roomId);
       return;
     }
 
@@ -86,13 +91,22 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    if (!ctx.playerId) {
+    if (!ctx.playerId || !ctx.roomId) {
       send(ctx.ws, { type: 'error', message: 'send hello first' });
+      return;
+    }
+
+    const room = rooms.get(ctx.roomId);
+    if (!room) {
+      send(ctx.ws, { type: 'error', message: 'room not found. reconnect required.' });
+      ctx.playerId = null;
+      ctx.roomId = null;
       return;
     }
 
     if (message.type === 'lobby_start') {
       handleLobbyStart(
+        room,
         ctx.playerId,
         message.difficulty ?? 'normal',
         message.aiPlayerCount,
@@ -101,53 +115,20 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    if (message.type === 'input' && game) {
-      game.receiveInput(ctx.playerId, { dir: message.dir, awaken: message.awaken });
+    if (message.type === 'input' && room.game) {
+      room.game.receiveInput(ctx.playerId, { dir: message.dir, awaken: message.awaken });
       return;
     }
 
     if (message.type === 'place_ping') {
-      handlePlacePing(ctx.playerId, message.kind);
+      handlePlacePing(room, ctx.playerId, message.kind);
       return;
     }
   });
 
   ws.on('close', () => {
+    handleClientClose(ctx);
     clients.delete(clientId);
-    const boundPlayerId = ctx.playerId;
-    if (!boundPlayerId) {
-      return;
-    }
-
-    if (activeClientByPlayerId.get(boundPlayerId) !== ctx.id) {
-      return;
-    }
-    activeClientByPlayerId.delete(boundPlayerId);
-
-    const member = lobbyPlayers.get(boundPlayerId);
-    if (!member) {
-      return;
-    }
-
-    if (game) {
-      if (member.spectator) {
-        lobbyPlayers.delete(member.id);
-        activeClientByPlayerId.delete(member.id);
-      } else {
-        member.connected = false;
-        member.ai = true;
-        game.setPlayerConnection(member.id, false);
-      }
-    } else {
-      lobbyPlayers.delete(member.id);
-      activeClientByPlayerId.delete(member.id);
-    }
-
-    if (hostId === member.id) {
-      hostId = chooseNextHost();
-    }
-
-    broadcastLobby();
   });
 });
 
@@ -155,45 +136,66 @@ server.listen(PORT, () => {
   console.log(`[server] listening on :${PORT}`);
 });
 
-function handleHello(ctx: ClientContext, requestedName: string, spectatorRequested: boolean, reconnectToken?: string): void {
+function handleHello(
+  ctx: ClientContext,
+  requestedName: string,
+  spectatorRequested: boolean,
+  reconnectToken?: string,
+  requestedRoomId?: string,
+): void {
+  const roomId = normalizeRoomId(requestedRoomId ?? ctx.roomId ?? 'main');
+  if (ctx.roomId && ctx.roomId !== roomId) {
+    const previousRoom = rooms.get(ctx.roomId);
+    if (previousRoom) {
+      leaveRoom(ctx, previousRoom);
+    } else {
+      ctx.playerId = null;
+      ctx.roomId = null;
+    }
+  }
+
+  const room = getOrCreateRoom(roomId);
   const name = sanitizeName(requestedName);
-  if (ctx.playerId) {
-    const current = lobbyPlayers.get(ctx.playerId);
+
+  if (ctx.playerId && ctx.roomId === room.id) {
+    const current = room.lobbyPlayers.get(ctx.playerId);
     if (current) {
       if (reconnectToken && reconnectToken !== current.reconnectToken) {
         send(ctx.ws, { type: 'error', message: 'reconnect token mismatch for this connection' });
         return;
       }
 
-      if (!game) {
+      if (!room.game) {
         current.spectator = spectatorRequested;
       }
       current.name = name;
       current.connected = true;
       current.ai = false;
 
-      bindClientToPlayer(ctx, current);
-      if (game && !current.spectator && game.hasPlayer(current.id)) {
-        game.setPlayerConnection(current.id, true);
+      bindClientToPlayer(ctx, room, current);
+      if (room.game && !current.spectator && room.game.hasPlayer(current.id)) {
+        room.game.setPlayerConnection(current.id, true);
       }
-      ensureHostAssigned(current.id);
+      ensureHostAssigned(room, current.id);
 
-      sendWelcomeAndInitialState(ctx, current);
-      broadcastLobby();
+      sendWelcomeAndInitialState(ctx, room, current);
+      broadcastLobby(room);
       return;
     }
 
+    room.activeClientByPlayerId.delete(ctx.playerId);
     ctx.playerId = null;
+    ctx.roomId = null;
   }
 
-  const existing = reconnectToken ? findPlayerByToken(reconnectToken) : null;
+  const existing = reconnectToken ? findPlayerByToken(room, reconnectToken) : null;
   if (existing) {
-    if (game && !existing.spectator && !game.hasPlayer(existing.id)) {
+    if (room.game && !existing.spectator && !room.game.hasPlayer(existing.id)) {
       send(ctx.ws, { type: 'error', message: 'game already running; reconnection only' });
       return;
     }
 
-    if (!game) {
+    if (!room.game) {
       existing.spectator = spectatorRequested;
     }
 
@@ -201,18 +203,18 @@ function handleHello(ctx: ClientContext, requestedName: string, spectatorRequest
     existing.connected = true;
     existing.ai = false;
 
-    bindClientToPlayer(ctx, existing);
-    if (game && !existing.spectator && game.hasPlayer(existing.id)) {
-      game.setPlayerConnection(existing.id, true);
+    bindClientToPlayer(ctx, room, existing);
+    if (room.game && !existing.spectator && room.game.hasPlayer(existing.id)) {
+      room.game.setPlayerConnection(existing.id, true);
     }
-    ensureHostAssigned(existing.id);
+    ensureHostAssigned(room, existing.id);
 
-    sendWelcomeAndInitialState(ctx, existing);
-    broadcastLobby();
+    sendWelcomeAndInitialState(ctx, room, existing);
+    broadcastLobby(room);
     return;
   }
 
-  if (game && !spectatorRequested) {
+  if (room.game && !spectatorRequested) {
     send(ctx.ws, { type: 'error', message: 'game already running; reconnection or spectator only' });
     return;
   }
@@ -229,63 +231,81 @@ function handleHello(ctx: ClientContext, requestedName: string, spectatorRequest
     reconnectToken: token,
   };
 
-  lobbyPlayers.set(member.id, member);
-  bindClientToPlayer(ctx, member);
-  ensureHostAssigned(member.id);
-  sendWelcomeAndInitialState(ctx, member);
+  room.lobbyPlayers.set(member.id, member);
+  bindClientToPlayer(ctx, room, member);
+  ensureHostAssigned(room, member.id);
+  sendWelcomeAndInitialState(ctx, room, member);
 
-  broadcastLobby();
+  broadcastLobby(room);
 }
 
-function sendWelcomeAndInitialState(ctx: ClientContext, member: LobbyPlayerInternal): void {
+function handleClientClose(ctx: ClientContext): void {
+  const boundPlayerId = ctx.playerId;
+  const boundRoomId = ctx.roomId;
+  if (!boundPlayerId || !boundRoomId) {
+    return;
+  }
+
+  const room = rooms.get(boundRoomId);
+  if (!room) {
+    ctx.playerId = null;
+    ctx.roomId = null;
+    return;
+  }
+
+  leaveRoom(ctx, room);
+}
+
+function sendWelcomeAndInitialState(ctx: ClientContext, room: RoomState, member: LobbyPlayerInternal): void {
   send(ctx.ws, {
     type: 'welcome',
     playerId: member.id,
     reconnectToken: member.reconnectToken,
-    isHost: hostId === member.id,
+    isHost: room.hostId === member.id,
     isSpectator: member.spectator,
   });
 
-  if (!game) {
+  if (!room.game) {
     return;
   }
 
   send(ctx.ws, {
     type: 'game_init',
     meId: member.id,
-    world: game.getWorldInit(),
-    config: game.config,
-    startedAtMs: game.startedAtMs,
-    seed: game.seed,
+    world: room.game.getWorldInit(),
+    config: room.game.config,
+    startedAtMs: room.game.startedAtMs,
+    seed: room.game.seed,
     isSpectator: member.spectator,
   });
 
   send(ctx.ws, {
     type: 'state',
-    snapshot: withPings(game.buildSnapshot(false)),
+    snapshot: withPings(room, room.game.buildSnapshot(false)),
   });
 }
 
 function handleLobbyStart(
+  room: RoomState,
   requestedBy: string,
   difficulty: Difficulty,
   aiPlayerCount?: number,
   timeLimitMinutes?: number,
 ): void {
-  if (game) {
+  if (room.game) {
     return;
   }
-  ensureHostAssigned();
+  ensureHostAssigned(room);
 
-  if (requestedBy !== hostId) {
-    const target = getClientByPlayerId(requestedBy);
+  if (requestedBy !== room.hostId) {
+    const target = getClientByPlayerId(room, requestedBy);
     if (target) {
       send(target.ws, { type: 'error', message: 'only host can start' });
     }
     return;
   }
 
-  const humanParticipants = Array.from(lobbyPlayers.values()).filter((player) => player.connected && !player.spectator);
+  const humanParticipants = Array.from(room.lobbyPlayers.values()).filter((player) => player.connected && !player.spectator);
   const aiCount = normalizeAiCount(aiPlayerCount);
   const startPlayers: StartPlayer[] = humanParticipants.map((player) => ({
     id: player.id,
@@ -304,7 +324,7 @@ function handleLobbyStart(
   }
 
   if (startPlayers.length === 0) {
-    const target = getClientByPlayerId(requestedBy);
+    const target = getClientByPlayerId(room, requestedBy);
     if (target) {
       send(target.ws, { type: 'error', message: 'no players. set AI players or join as player.' });
     }
@@ -312,89 +332,90 @@ function handleLobbyStart(
   }
 
   const timeLimitMsOverride = normalizeTimeLimitMs(timeLimitMinutes);
-  game = new GameEngine(startPlayers, difficulty, Date.now(), { timeLimitMsOverride });
-  pingManager.clear();
-  runningAiCount = aiCount;
+  room.game = new GameEngine(startPlayers, difficulty, Date.now(), { timeLimitMsOverride });
+  room.pingManager.clear();
+  room.runningAiCount = aiCount;
 
-  for (const player of lobbyPlayers.values()) {
+  for (const player of room.lobbyPlayers.values()) {
     if (player.spectator) {
       player.ai = false;
       continue;
     }
 
-    if (!game.hasPlayer(player.id)) {
-      lobbyPlayers.delete(player.id);
+    if (!room.game.hasPlayer(player.id)) {
+      room.lobbyPlayers.delete(player.id);
+      room.activeClientByPlayerId.delete(player.id);
       continue;
     }
 
     player.ai = !player.connected;
   }
 
-  const startNote = `ゲーム開始 (human:${humanParticipants.length}, ai:${aiCount}, limit:${Math.floor(
-    game.config.timeLimitMs / 60_000,
+  const startNote = `ゲーム開始 (room:${room.id}, human:${humanParticipants.length}, ai:${aiCount}, limit:${Math.floor(
+    room.game.config.timeLimitMs / 60_000,
   )}m)`;
-  broadcastLobby(startNote);
+  broadcastLobby(room, startNote);
 
-  for (const member of lobbyPlayers.values()) {
+  for (const member of room.lobbyPlayers.values()) {
     if (!member.connected) {
       continue;
     }
 
-    const client = getClientByPlayerId(member.id);
-    if (!client) {
+    const client = getClientByPlayerId(room, member.id);
+    if (!client || !room.game) {
       continue;
     }
 
     send(client.ws, {
       type: 'game_init',
       meId: member.id,
-      world: game.getWorldInit(),
-      config: game.config,
-      startedAtMs: game.startedAtMs,
-      seed: game.seed,
+      world: room.game.getWorldInit(),
+      config: room.game.config,
+      startedAtMs: room.game.startedAtMs,
+      seed: room.game.seed,
       isSpectator: member.spectator,
     });
   }
 
-  loop = setInterval(() => {
-    const running = game;
+  room.loop = setInterval(() => {
+    const running = room.game;
     if (!running) {
       return;
     }
 
     running.step(TICK_MS);
-    const snapshot = withPings(running.buildSnapshot(true));
-    broadcast({ type: 'state', snapshot });
+    const snapshot = withPings(room, running.buildSnapshot(true));
+    broadcast(room, { type: 'state', snapshot });
 
     if (running.isEnded()) {
       const summary = running.buildSummary();
       rankingStore.recordMatch(summary);
-      broadcast({ type: 'game_over', summary });
+      broadcast(room, { type: 'game_over', summary });
 
-      if (loop) {
-        clearInterval(loop);
-        loop = null;
+      if (room.loop) {
+        clearInterval(room.loop);
+        room.loop = null;
       }
 
-      game = null;
-      runningAiCount = 0;
-      pingManager.clear();
+      room.game = null;
+      room.runningAiCount = 0;
+      room.pingManager.clear();
 
-      for (const player of lobbyPlayers.values()) {
+      for (const player of room.lobbyPlayers.values()) {
         player.ai = false;
       }
 
-      ensureHostAssigned();
-
-      broadcastLobby('ゲーム終了。再スタート可能です');
+      ensureHostAssigned(room);
+      broadcastLobby(room, 'ゲーム終了。再スタート可能です');
+      cleanupRoomIfIdle(room);
     }
   }, TICK_MS);
 }
 
-function handlePlacePing(playerId: string, kind: PingType): void {
-  const running = game;
-  const member = lobbyPlayers.get(playerId);
-  const client = getClientByPlayerId(playerId);
+function handlePlacePing(room: RoomState, playerId: string, kind: PingType): void {
+  const running = room.game;
+  const member = room.lobbyPlayers.get(playerId);
+  const client = getClientByPlayerId(room, playerId);
 
   if (!member || !client) {
     return;
@@ -416,7 +437,7 @@ function handlePlacePing(playerId: string, kind: PingType): void {
     return;
   }
 
-  const result = pingManager.place({
+  const result = room.pingManager.place({
     ownerId: member.id,
     ownerName: member.name,
     x: Math.floor(position.x),
@@ -428,13 +449,12 @@ function handlePlacePing(playerId: string, kind: PingType): void {
 
   if (!result.ok) {
     send(client.ws, { type: 'error', message: result.reason ?? 'failed to place ping' });
-    return;
   }
 }
 
-function broadcastLobby(note?: string): void {
-  ensureHostAssigned();
-  const ordered = Array.from(lobbyPlayers.values())
+function broadcastLobby(room: RoomState, note?: string): void {
+  ensureHostAssigned(room);
+  const ordered = Array.from(room.lobbyPlayers.values())
     .sort((a, b) => a.name.localeCompare(b.name, 'ja'))
     .map((player) => ({
       id: player.id,
@@ -442,28 +462,29 @@ function broadcastLobby(note?: string): void {
       connected: player.connected,
       ai: player.ai,
       spectator: player.spectator,
-      isHost: player.id === hostId,
+      isHost: player.id === room.hostId,
     }));
 
   const spectatorCount = ordered.filter((player) => player.spectator).length;
-  const canStart = !!hostId && !!lobbyPlayers.get(hostId)?.connected;
-  const composedNote = runningAiCount > 0 && !note ? `AI稼働中: ${runningAiCount}` : note;
+  const canStart = !!room.hostId && !!room.lobbyPlayers.get(room.hostId)?.connected;
+  const composedNote = room.runningAiCount > 0 && !note ? `AI稼働中: ${room.runningAiCount}` : note;
 
-  broadcast({
+  broadcast(room, {
     type: 'lobby',
     players: ordered,
-    hostId,
+    hostId: room.hostId,
     canStart,
-    running: !!game,
+    running: !!room.game,
     spectatorCount,
     note: composedNote,
   });
 }
 
-function broadcast(message: ServerMessage): void {
+function broadcast(room: RoomState, message: ServerMessage): void {
   const payload = JSON.stringify(message);
-  for (const ctx of clients.values()) {
-    if (!canReceiveBroadcast(ctx)) {
+  for (const clientId of room.activeClientByPlayerId.values()) {
+    const ctx = clients.get(clientId);
+    if (!ctx || !ctx.playerId || ctx.roomId !== room.id) {
       continue;
     }
     if (ctx.ws.readyState === ctx.ws.OPEN) {
@@ -499,8 +520,9 @@ function parseMessage(raw: string): ClientMessage | null {
             : null;
       const spectator =
         value.spectator === undefined ? undefined : typeof value.spectator === 'boolean' ? value.spectator : null;
+      const roomId = value.roomId === undefined ? undefined : typeof value.roomId === 'string' ? value.roomId : null;
 
-      if (reconnectToken === null || spectator === null) {
+      if (reconnectToken === null || spectator === null || roomId === null) {
         return null;
       }
       return {
@@ -508,6 +530,7 @@ function parseMessage(raw: string): ClientMessage | null {
         name: value.name,
         reconnectToken,
         spectator,
+        roomId,
       };
     }
 
@@ -595,8 +618,19 @@ function sanitizeName(name: string): string {
   return trimmed.slice(0, 16);
 }
 
-function chooseNextHost(): string | null {
-  for (const player of lobbyPlayers.values()) {
+function normalizeRoomId(raw: string): string {
+  const trimmed = raw.trim().slice(0, 24);
+  if (!trimmed) {
+    return 'main';
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+    return 'main';
+  }
+  return trimmed;
+}
+
+function chooseNextHost(room: RoomState): string | null {
+  for (const player of room.lobbyPlayers.values()) {
     if (player.connected) {
       return player.id;
     }
@@ -604,25 +638,25 @@ function chooseNextHost(): string | null {
   return null;
 }
 
-function ensureHostAssigned(preferredPlayerId?: string): void {
-  const currentHost = hostId ? lobbyPlayers.get(hostId) : null;
+function ensureHostAssigned(room: RoomState, preferredPlayerId?: string): void {
+  const currentHost = room.hostId ? room.lobbyPlayers.get(room.hostId) : null;
   if (currentHost?.connected) {
     return;
   }
 
   if (preferredPlayerId) {
-    const preferred = lobbyPlayers.get(preferredPlayerId);
+    const preferred = room.lobbyPlayers.get(preferredPlayerId);
     if (preferred?.connected) {
-      hostId = preferred.id;
+      room.hostId = preferred.id;
       return;
     }
   }
 
-  hostId = chooseNextHost();
+  room.hostId = chooseNextHost(room);
 }
 
-function findPlayerByToken(token: string): LobbyPlayerInternal | null {
-  for (const player of lobbyPlayers.values()) {
+function findPlayerByToken(room: RoomState, token: string): LobbyPlayerInternal | null {
+  for (const player of room.lobbyPlayers.values()) {
     if (player.reconnectToken === token) {
       return player;
     }
@@ -630,8 +664,8 @@ function findPlayerByToken(token: string): LobbyPlayerInternal | null {
   return null;
 }
 
-function getClientByPlayerId(playerId: string): ClientContext | null {
-  const clientId = activeClientByPlayerId.get(playerId);
+function getClientByPlayerId(room: RoomState, playerId: string): ClientContext | null {
+  const clientId = room.activeClientByPlayerId.get(playerId);
   if (!clientId) {
     return null;
   }
@@ -653,38 +687,106 @@ function normalizeTimeLimitMs(value: number | undefined): number | undefined {
   return minutes * 60_000;
 }
 
-function withPings(snapshot: ReturnType<GameEngine['buildSnapshot']>): ReturnType<GameEngine['buildSnapshot']> {
-  snapshot.pings = pingManager.snapshot(snapshot.nowMs);
-  return snapshot;
-}
+function bindClientToPlayer(ctx: ClientContext, room: RoomState, member: LobbyPlayerInternal): void {
+  if (ctx.playerId === member.id && ctx.roomId === room.id && room.activeClientByPlayerId.get(member.id) === ctx.id) {
+    return;
+  }
 
-function bindClientToPlayer(ctx: ClientContext, member: LobbyPlayerInternal): void {
-  const oldClientId = activeClientByPlayerId.get(member.id);
+  const oldClientId = room.activeClientByPlayerId.get(member.id);
   if (oldClientId && oldClientId !== ctx.id) {
     const oldClient = clients.get(oldClientId);
     if (oldClient) {
       oldClient.playerId = null;
+      oldClient.roomId = null;
       if (oldClient.ws.readyState === oldClient.ws.OPEN) {
         oldClient.ws.close(4001, 'superseded by new connection');
       }
     }
   }
 
-  if (ctx.playerId && ctx.playerId !== member.id) {
-    activeClientByPlayerId.delete(ctx.playerId);
+  if (ctx.playerId && ctx.roomId) {
+    const previousRoom = rooms.get(ctx.roomId);
+    if (previousRoom && previousRoom.activeClientByPlayerId.get(ctx.playerId) === ctx.id) {
+      previousRoom.activeClientByPlayerId.delete(ctx.playerId);
+    }
   }
+
   ctx.playerId = member.id;
-  activeClientByPlayerId.set(member.id, ctx.id);
+  ctx.roomId = room.id;
+  room.activeClientByPlayerId.set(member.id, ctx.id);
 }
 
-function canReceiveBroadcast(ctx: ClientContext): boolean {
-  if (!ctx.playerId) {
-    return false;
+function leaveRoom(ctx: ClientContext, room: RoomState): void {
+  if (!ctx.playerId || ctx.roomId !== room.id) {
+    return;
   }
-  if (activeClientByPlayerId.get(ctx.playerId) !== ctx.id) {
-    return false;
+  if (room.activeClientByPlayerId.get(ctx.playerId) !== ctx.id) {
+    ctx.playerId = null;
+    ctx.roomId = null;
+    return;
   }
-  return lobbyPlayers.has(ctx.playerId);
+
+  const member = room.lobbyPlayers.get(ctx.playerId);
+  room.activeClientByPlayerId.delete(ctx.playerId);
+
+  if (member) {
+    if (room.game) {
+      if (member.spectator) {
+        room.lobbyPlayers.delete(member.id);
+      } else {
+        member.connected = false;
+        member.ai = true;
+        room.game.setPlayerConnection(member.id, false);
+      }
+    } else {
+      room.lobbyPlayers.delete(member.id);
+    }
+
+    if (room.hostId === member.id) {
+      room.hostId = chooseNextHost(room);
+    }
+
+    broadcastLobby(room);
+  }
+
+  ctx.playerId = null;
+  ctx.roomId = null;
+  cleanupRoomIfIdle(room);
+}
+
+function withPings(snapshotOwner: RoomState, snapshot: ReturnType<GameEngine['buildSnapshot']>): ReturnType<GameEngine['buildSnapshot']> {
+  snapshot.pings = snapshotOwner.pingManager.snapshot(snapshot.nowMs);
+  return snapshot;
+}
+
+function getOrCreateRoom(roomId: string): RoomState {
+  const existing = rooms.get(roomId);
+  if (existing) {
+    return existing;
+  }
+
+  const created: RoomState = {
+    id: roomId,
+    lobbyPlayers: new Map<string, LobbyPlayerInternal>(),
+    activeClientByPlayerId: new Map<string, string>(),
+    hostId: null,
+    game: null,
+    loop: null,
+    runningAiCount: 0,
+    pingManager: new PingManager(),
+  };
+  rooms.set(roomId, created);
+  return created;
+}
+
+function cleanupRoomIfIdle(room: RoomState): void {
+  if (room.game || room.loop || room.activeClientByPlayerId.size > 0) {
+    return;
+  }
+  room.lobbyPlayers.clear();
+  room.hostId = null;
+  room.runningAiCount = 0;
+  rooms.delete(room.id);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

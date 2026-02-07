@@ -18,6 +18,7 @@
   - `name`: 表示名
   - `reconnectToken?`: 再接続トークン
   - `spectator?`: `true` で観戦参加
+  - `roomId?`: 参加ルームID（省略時 `main`）
 - `lobby_start`
   - `difficulty?`: `casual | normal | hard | nightmare`
   - `aiPlayerCount?`: AIプレイヤー人数
