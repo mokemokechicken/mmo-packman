@@ -18,6 +18,9 @@
 - `input`
   - `dir?`: `up/down/left/right`
   - `awaken?`: `true` で覚醒発動要求
+- `place_ping`
+  - `kind`: `focus | danger | help`
+  - 座標はサーバーが投稿者の現在位置を採用する
 - `ping`
   - `t`: 任意の数値
 
@@ -41,6 +44,7 @@
 - `state`
   - 20Hz スナップショット
   - プレイヤー / ゴースト / フルーツ / セクター / ゲート
+  - `pings`（TTL付きピン一覧）
   - 差分イベント（ドット消化、ダウン、救出など）
 - `game_over`
   - 勝敗理由
@@ -62,6 +66,7 @@
 
 - 現在はMVPのためメッセージ署名・暗号化は未実装
 - 本番化時は認証とレート制限を追加する
+- 観戦者は `place_ping` 不可（閲覧のみ）。サーバー側で拒否する。
 
 ## `game_over.summary.awards` の形式
 

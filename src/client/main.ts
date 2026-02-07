@@ -7,6 +7,8 @@ import type {
   GameSummary,
   GhostView,
   LobbyPlayer,
+  PingType,
+  PingView,
   PlayerView,
   RuntimeEvent,
   ServerMessage,
@@ -66,6 +68,7 @@ let snapshot: Snapshot | null = null;
 let summary: GameSummary | null = null;
 let lobbyMessage = '';
 let logs: string[] = [];
+const observedPingIds = new Set<string>();
 let currentDir: 'up' | 'down' | 'left' | 'right' | 'none' = 'none';
 let followPlayerId: string | null = null;
 let spectatorCameraMode: SpectatorCameraMode = 'follow';
@@ -182,6 +185,7 @@ function handleServerMessage(message: ServerMessage): void {
     summary = null;
     snapshot = null;
     logs = [];
+    observedPingIds.clear();
     followPlayerId = null;
     spectatorCameraMode = 'follow';
     spectatorZoom = 1;
@@ -208,10 +212,11 @@ function handleServerMessage(message: ServerMessage): void {
 
   if (message.type === 'state') {
     const previousSnapshot = snapshot;
-    snapshot = message.snapshot;
-    playAwakenTransitions(previousSnapshot, message.snapshot);
-    updateInterpolationStates(message.snapshot);
-    for (const event of message.snapshot.events) {
+    snapshot = normalizeSnapshot(message.snapshot);
+    syncPingLogs(snapshot.pings);
+    playAwakenTransitions(previousSnapshot, snapshot);
+    updateInterpolationStates(snapshot);
+    for (const event of snapshot.events) {
       applyEvent(event);
     }
     updateHud();
@@ -271,6 +276,22 @@ function applyEvent(event: RuntimeEvent): void {
     pushLog(`ボスにヒット (残りHP: ${event.hp})`);
   } else if (event.type === 'toast') {
     pushLog(event.message);
+  }
+}
+
+function syncPingLogs(pings: PingView[]): void {
+  const nextObserved = new Set<string>();
+  for (const ping of pings) {
+    nextObserved.add(ping.id);
+    if (observedPingIds.has(ping.id)) {
+      continue;
+    }
+    const label = pingKindLabel(ping.kind);
+    pushLog(`PING ${label}: ${ping.ownerName}`);
+  }
+  observedPingIds.clear();
+  for (const id of nextObserved) {
+    observedPingIds.add(id);
   }
 }
 
@@ -339,7 +360,7 @@ function renderLobby(players: LobbyPlayer[], running: boolean, canStart: boolean
       </ul>
 
       <p class="hint">AI-onlyテスト: 観戦モード + AI人数(2/5など) で開始</p>
-      <p class="hint">プレイヤー操作: 方向キー/WASD, 覚醒: Space/E/Enter</p>
+      <p class="hint">プレイヤー操作: 方向キー/WASD, 覚醒: Space/E/Enter, ピン: G(注目)/V(危険)/B(救助)</p>
     </div>
   `;
 
@@ -427,6 +448,13 @@ function normalizeSummary(raw: GameSummary): GameSummary {
   };
 }
 
+function normalizeSnapshot(raw: Snapshot): Snapshot {
+  return {
+    ...raw,
+    pings: raw.pings ?? [],
+  };
+}
+
 function renderAwards(awards: AwardEntry[]): string {
   if (awards.length === 0) {
     return '<p class="muted">該当する表彰はありません。</p>';
@@ -455,6 +483,11 @@ function wireKeyboard(): void {
     a: 'left',
     d: 'right',
   };
+  const pingMap: Record<string, PingType> = {
+    g: 'focus',
+    v: 'danger',
+    b: 'help',
+  };
 
   window.addEventListener('keydown', (event) => {
     const rawKey = event.key;
@@ -463,6 +496,12 @@ function wireKeyboard(): void {
 
     if (isSpectator) {
       if (typingInForm) {
+        return;
+      }
+      const pingKind = pingMap[key];
+      if (pingKind) {
+        event.preventDefault();
+        placePing(pingKind);
         return;
       }
       if (rawKey === 'Tab' || rawKey === ']' || key === 'e') {
@@ -484,6 +523,13 @@ function wireKeyboard(): void {
           panSpectatorCamera(panDir);
         }
       }
+      return;
+    }
+
+    const pingKind = pingMap[key];
+    if (pingKind) {
+      event.preventDefault();
+      placePing(pingKind);
       return;
     }
 
@@ -544,6 +590,25 @@ function updateTouchControlsVisibility(): void {
   } else {
     touchControls.classList.remove('hidden');
   }
+}
+
+function placePing(kind: PingType): void {
+  if (isSpectator) {
+    pushLog('観戦モードではピン送信できません');
+    return;
+  }
+  if (!snapshot) {
+    return;
+  }
+  const me = snapshot.players.find((player) => player.id === meId);
+  if (!me) {
+    return;
+  }
+
+  send({
+    type: 'place_ping',
+    kind,
+  });
 }
 
 function cycleSpectatorTarget(delta = 1): void {
@@ -1061,6 +1126,7 @@ function updateHud(): void {
       <p>残り時間: ${formatMs(snapshot.timeLeftMs)}</p>
       <p>ゴースト: ${ghosts} / フルーツ: ${fruits}</p>
       <p>ダウン: ${downCount}</p>
+      <p>ピン: ${snapshot.pings.length} (G:注目 / V:危険 / B:救助)</p>
       ${meLine}
       <h4>イベント</h4>
       <ul>${logs.slice(-8).map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>
@@ -1196,6 +1262,7 @@ function draw(): void {
     snapshot.nowMs,
     interpolationAlpha,
   );
+  drawPings(snapshot.pings, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY, snapshot.nowMs);
   drawSpectatorMinimap(world, snapshot, minX, minY, maxX, maxY);
 }
 
@@ -1387,6 +1454,44 @@ function drawPlayers(
     ctx.fillStyle = '#f7f9ff';
     ctx.font = `${Math.max(9, Math.floor(tileSize * 0.36))}px monospace`;
     ctx.fillText(player.name.slice(0, 7), sx - tileSize * 0.45, sy - tileSize * 0.45);
+  }
+}
+
+function drawPings(
+  pings: PingView[],
+  worldState: WorldInit,
+  state: Snapshot,
+  originX: number,
+  originY: number,
+  tileSize: number,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+  nowMs: number,
+): void {
+  for (const ping of pings) {
+    if (ping.x < minX || ping.x > maxX || ping.y < minY || ping.y > maxY) {
+      continue;
+    }
+    const sector = sectorAt(worldState, state, ping.x, ping.y);
+    if (!sector?.discovered) {
+      continue;
+    }
+
+    const px = originX + ping.x * tileSize + tileSize / 2;
+    const py = originY + ping.y * tileSize + tileSize / 2;
+    const remainRatio = clampNumber((ping.expiresAtMs - nowMs) / Math.max(1, ping.expiresAtMs - ping.createdAtMs), 0, 1);
+    const pulse = 1 + 0.12 * Math.sin((nowMs / 180) % (Math.PI * 2));
+    const baseRadius = Math.max(5, tileSize * 0.35) * pulse;
+    const color = pingKindColor(ping.kind);
+
+    circle(px, py, baseRadius, `rgba(${color.r}, ${color.g}, ${color.b}, ${(0.25 + remainRatio * 0.45).toFixed(3)})`);
+    circle(px, py, Math.max(3, tileSize * 0.18), `rgb(${color.r}, ${color.g}, ${color.b})`);
+
+    ctx.fillStyle = `rgba(240, 248, 255, ${(0.55 + remainRatio * 0.45).toFixed(3)})`;
+    ctx.font = `${Math.max(9, Math.floor(tileSize * 0.28))}px monospace`;
+    ctx.fillText(`${pingKindLabel(ping.kind)} ${ping.ownerName.slice(0, 8)}`, px - tileSize * 0.55, py - tileSize * 0.58);
   }
 }
 
@@ -1603,6 +1708,32 @@ function fruitLabel(type: FruitView['type']): string {
     return 'キー';
   }
   return 'グレープ';
+}
+
+function pingKindLabel(kind: PingType): string {
+  if (kind === 'focus') {
+    return '注目';
+  }
+  if (kind === 'danger') {
+    return '危険';
+  }
+  if (kind === 'help') {
+    return '救助';
+  }
+  return kind;
+}
+
+function pingKindColor(kind: PingType): { r: number; g: number; b: number } {
+  if (kind === 'focus') {
+    return { r: 104, g: 215, b: 255 };
+  }
+  if (kind === 'danger') {
+    return { r: 255, g: 124, b: 124 };
+  }
+  if (kind === 'help') {
+    return { r: 146, g: 255, b: 170 };
+  }
+  return { r: 218, g: 222, b: 233 };
 }
 
 function fruitColor(type: FruitView['type']): string {
