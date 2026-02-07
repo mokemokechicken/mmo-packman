@@ -37,6 +37,8 @@ interface InterpolationState {
   updatedAtMs: number;
 }
 
+type SpectatorCameraMode = 'follow' | 'free';
+
 let ws: WebSocket | null = null;
 let reconnectTimer: number | null = null;
 let reconnectToken = localStorage.getItem('mmo-packman-token') ?? '';
@@ -66,6 +68,11 @@ let lobbyMessage = '';
 let logs: string[] = [];
 let currentDir: 'up' | 'down' | 'left' | 'right' | 'none' = 'none';
 let followPlayerId: string | null = null;
+let spectatorCameraMode: SpectatorCameraMode = 'follow';
+let spectatorZoom = 1;
+let freeCameraCenter: { x: number; y: number } | null = null;
+let spectatorMinimapCanvas: HTMLCanvasElement | null = null;
+let spectatorMinimapCtx: CanvasRenderingContext2D | null = null;
 let latestSnapshotReceivedAtMs = performance.now();
 const playerInterpolation = new Map<string, InterpolationState>();
 const ghostInterpolation = new Map<string, InterpolationState>();
@@ -176,6 +183,9 @@ function handleServerMessage(message: ServerMessage): void {
     snapshot = null;
     logs = [];
     followPlayerId = null;
+    spectatorCameraMode = 'follow';
+    spectatorZoom = 1;
+    freeCameraCenter = null;
     playerInterpolation.clear();
     ghostInterpolation.clear();
     latestSnapshotReceivedAtMs = performance.now();
@@ -449,14 +459,30 @@ function wireKeyboard(): void {
   window.addEventListener('keydown', (event) => {
     const rawKey = event.key;
     const key = rawKey.length === 1 ? rawKey.toLowerCase() : rawKey;
+    const typingInForm = isTypingInFormElement(event.target);
 
     if (isSpectator) {
+      if (typingInForm) {
+        return;
+      }
       if (rawKey === 'Tab' || rawKey === ']' || key === 'e') {
         event.preventDefault();
         cycleSpectatorTarget(1);
       } else if (rawKey === '[' || key === 'q') {
         event.preventDefault();
         cycleSpectatorTarget(-1);
+      } else if (key === '+' || key === '=' || rawKey === 'PageUp') {
+        event.preventDefault();
+        adjustSpectatorZoom(1);
+      } else if (key === '-' || rawKey === 'PageDown') {
+        event.preventDefault();
+        adjustSpectatorZoom(-1);
+      } else {
+        const panDir = dirMap[key];
+        if (panDir) {
+          event.preventDefault();
+          panSpectatorCamera(panDir);
+        }
       }
       return;
     }
@@ -533,6 +559,8 @@ function cycleSpectatorTarget(delta = 1): void {
   if (!followPlayerId) {
     const best = [...players].sort((a, b) => b.score - a.score)[0];
     followPlayerId = best?.id ?? null;
+    spectatorCameraMode = 'follow';
+    freeCameraCenter = null;
     updateStatusPanels();
     return;
   }
@@ -542,6 +570,8 @@ function cycleSpectatorTarget(delta = 1): void {
   const nextIndex = (normalized + delta + players.length) % players.length;
   const next = players[nextIndex];
   followPlayerId = next?.id ?? followPlayerId;
+  spectatorCameraMode = 'follow';
+  freeCameraCenter = null;
   updateStatusPanels();
 }
 
@@ -553,13 +583,186 @@ function initSpectatorControls(): void {
       <span id="spectator-target">auto</span>
       <button id="spectator-next" type="button">▶</button>
     </div>
-    <div class="hint">Tab / ] / E: 次, [ / Q: 前</div>
+    <div class="spec-row">
+      <button id="spectator-mode" type="button">追従モード</button>
+      <button id="spectator-zoom-out" type="button">-</button>
+      <span id="spectator-zoom">100%</span>
+      <button id="spectator-zoom-in" type="button">+</button>
+    </div>
+    <canvas id="spectator-minimap" width="220" height="220"></canvas>
+    <div class="hint">Tab / ] / E: 次, [ / Q: 前, WASD/矢印: パン, +/-: ズーム</div>
+    <div class="hint">ミニマップをクリックでフォーカス切替/自由カメラ移動</div>
   `;
 
   const prev = document.getElementById('spectator-prev');
   const next = document.getElementById('spectator-next');
   prev?.addEventListener('click', () => cycleSpectatorTarget(-1));
   next?.addEventListener('click', () => cycleSpectatorTarget(1));
+
+  const modeButton = document.getElementById('spectator-mode');
+  modeButton?.addEventListener('click', () => toggleSpectatorCameraMode());
+
+  const zoomOut = document.getElementById('spectator-zoom-out');
+  const zoomIn = document.getElementById('spectator-zoom-in');
+  zoomOut?.addEventListener('click', () => adjustSpectatorZoom(-1));
+  zoomIn?.addEventListener('click', () => adjustSpectatorZoom(1));
+
+  spectatorMinimapCanvas = document.getElementById('spectator-minimap') as HTMLCanvasElement | null;
+  spectatorMinimapCtx = spectatorMinimapCanvas?.getContext('2d') ?? null;
+  spectatorMinimapCanvas?.addEventListener('click', (event) => handleMinimapClick(event));
+
+  canvas.addEventListener(
+    'wheel',
+    (event) => {
+      if (!isSpectator) {
+        return;
+      }
+      event.preventDefault();
+      adjustSpectatorZoom(event.deltaY < 0 ? 1 : -1);
+    },
+    { passive: false },
+  );
+}
+
+function toggleSpectatorCameraMode(): void {
+  if (!isSpectator || !world || !snapshot) {
+    return;
+  }
+  if (spectatorCameraMode === 'follow') {
+    spectatorCameraMode = 'free';
+    const center = resolveCameraCenter(world, snapshot);
+    freeCameraCenter = { x: center.x, y: center.y };
+  } else {
+    spectatorCameraMode = 'follow';
+    freeCameraCenter = null;
+  }
+  updateStatusPanels();
+}
+
+function panSpectatorCamera(dir: 'up' | 'down' | 'left' | 'right'): void {
+  if (!isSpectator || !world || !snapshot) {
+    return;
+  }
+  if (spectatorCameraMode !== 'free') {
+    spectatorCameraMode = 'free';
+    const center = resolveCameraCenter(world, snapshot);
+    freeCameraCenter = { x: center.x, y: center.y };
+  }
+  const step = Math.max(1, Math.round(2 / spectatorZoom));
+  const current = freeCameraCenter ?? { x: world.width / 2, y: world.height / 2 };
+  const next = { ...current };
+  if (dir === 'up') {
+    next.y -= step;
+  } else if (dir === 'down') {
+    next.y += step;
+  } else if (dir === 'left') {
+    next.x -= step;
+  } else if (dir === 'right') {
+    next.x += step;
+  }
+  freeCameraCenter = clampCameraCenter(world, next.x, next.y);
+  updateStatusPanels();
+}
+
+function adjustSpectatorZoom(direction: 1 | -1): void {
+  if (!isSpectator) {
+    return;
+  }
+  spectatorZoom = clampNumber(spectatorZoom + direction * 0.1, 0.6, 2.4);
+  updateStatusPanels();
+}
+
+function handleMinimapClick(event: MouseEvent): void {
+  if (!isSpectator || !world || !snapshot || !spectatorMinimapCanvas) {
+    return;
+  }
+  const rect = spectatorMinimapCanvas.getBoundingClientRect();
+  const ratioX = clampNumber((event.clientX - rect.left) / rect.width, 0, 1);
+  const ratioY = clampNumber((event.clientY - rect.top) / rect.height, 0, 1);
+  const worldX = ratioX * Math.max(1, world.width - 1) + 0.5;
+  const worldY = ratioY * Math.max(1, world.height - 1) + 0.5;
+
+  let nearest: PlayerView | null = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  for (const player of snapshot.players) {
+    const distance = Math.hypot(player.x + 0.5 - worldX, player.y + 0.5 - worldY);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearest = player;
+    }
+  }
+
+  if (nearest && nearestDistance <= 4) {
+    followPlayerId = nearest.id;
+    spectatorCameraMode = 'follow';
+    freeCameraCenter = null;
+  } else {
+    spectatorCameraMode = 'free';
+    freeCameraCenter = clampCameraCenter(world, worldX, worldY);
+  }
+  updateStatusPanels();
+}
+
+function drawSpectatorMinimap(
+  worldState: WorldInit,
+  state: Snapshot,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+): void {
+  if (!isSpectator || !spectatorMinimapCanvas || !spectatorMinimapCtx) {
+    return;
+  }
+  const miniWidth = spectatorMinimapCanvas.width;
+  const miniHeight = spectatorMinimapCanvas.height;
+  const mapScaleX = miniWidth / worldState.width;
+  const mapScaleY = miniHeight / worldState.height;
+  const miniCtx = spectatorMinimapCtx;
+
+  miniCtx.clearRect(0, 0, miniWidth, miniHeight);
+  miniCtx.fillStyle = 'rgba(4, 8, 16, 0.96)';
+  miniCtx.fillRect(0, 0, miniWidth, miniHeight);
+  miniCtx.strokeStyle = 'rgba(160, 198, 255, 0.28)';
+  miniCtx.strokeRect(0, 0, miniWidth, miniHeight);
+
+  for (const sector of state.sectors) {
+    const x = sector.x * mapScaleX;
+    const y = sector.y * mapScaleY;
+    const width = Math.max(1, sector.size * mapScaleX);
+    const height = Math.max(1, sector.size * mapScaleY);
+    if (!sector.discovered) {
+      miniCtx.fillStyle = '#090b12';
+    } else if (sector.captured) {
+      miniCtx.fillStyle = '#184b66';
+    } else {
+      miniCtx.fillStyle = '#13213b';
+    }
+    miniCtx.fillRect(x, y, width, height);
+  }
+
+  for (const player of state.players) {
+    const px = (player.x + 0.5) * mapScaleX;
+    const py = (player.y + 0.5) * mapScaleY;
+    miniCtx.beginPath();
+    miniCtx.arc(px, py, 3.2, 0, Math.PI * 2);
+    miniCtx.fillStyle = player.id === followPlayerId ? '#ffe784' : '#ffb36c';
+    miniCtx.fill();
+    if (player.id === followPlayerId) {
+      miniCtx.beginPath();
+      miniCtx.arc(px, py, 5.2, 0, Math.PI * 2);
+      miniCtx.strokeStyle = 'rgba(255, 240, 174, 0.9)';
+      miniCtx.stroke();
+    }
+  }
+
+  const viewportX = minX * mapScaleX;
+  const viewportY = minY * mapScaleY;
+  const viewportWidth = Math.max(2, (maxX - minX + 1) * mapScaleX);
+  const viewportHeight = Math.max(2, (maxY - minY + 1) * mapScaleY);
+  miniCtx.strokeStyle = 'rgba(113, 236, 255, 0.88)';
+  miniCtx.lineWidth = 1.2;
+  miniCtx.strokeRect(viewportX, viewportY, viewportWidth, viewportHeight);
 }
 
 function initAudioSettingsPanel(): void {
@@ -815,11 +1018,20 @@ function updateSpectatorControls(): void {
     return;
   }
 
-  resolveFocusPlayer(snapshot);
   spectatorControls.classList.remove('hidden');
   const targetText = document.getElementById('spectator-target');
   if (targetText) {
     targetText.textContent = currentFollowName(snapshot.players);
+  }
+
+  const modeButton = document.getElementById('spectator-mode');
+  if (modeButton) {
+    modeButton.textContent = spectatorCameraMode === 'follow' ? '追従モード' : '自由カメラ';
+  }
+
+  const zoomText = document.getElementById('spectator-zoom');
+  if (zoomText) {
+    zoomText.textContent = `${Math.round(spectatorZoom * 100)}%`;
   }
 }
 
@@ -834,9 +1046,10 @@ function updateHud(): void {
   const ghosts = snapshot.ghosts.length;
   const fruits = snapshot.fruits.length;
   const modeText = isSpectator ? '観戦' : 'プレイ';
+  const cameraModeText = spectatorCameraMode === 'follow' ? '追従' : '自由';
 
   const meLine = isSpectator
-    ? `<p>mode: ${modeText} | follow: ${escapeHtml(currentFollowName(snapshot.players))}</p>`
+    ? `<p>mode: ${modeText} | cam: ${cameraModeText} (${Math.round(spectatorZoom * 100)}%) | follow: ${escapeHtml(currentFollowName(snapshot.players))}</p>`
     : me
       ? `<p>mode: ${modeText}</p><p>自分: ${escapeHtml(me.name)} | score ${me.score} | 状態: ${me.state}</p>`
       : '<p>自分の情報なし</p>';
@@ -883,7 +1096,10 @@ function draw(): void {
   const centerY = camera.y;
   const interpolationAlpha = getInterpolationAlpha();
 
-  const tileSize = Math.max(12, Math.min(30, Math.floor(Math.min(canvas.width, canvas.height) / 26)));
+  const baseTileSize = Math.floor(Math.min(canvas.width, canvas.height) / 26);
+  const tileSize = isSpectator
+    ? clampNumber(Math.floor(baseTileSize * spectatorZoom), 10, 54)
+    : Math.max(12, Math.min(30, baseTileSize));
   const originX = Math.floor(canvas.width / 2 - centerX * tileSize);
   const originY = Math.floor(canvas.height / 2 - centerY * tileSize);
 
@@ -980,22 +1196,33 @@ function draw(): void {
     snapshot.nowMs,
     interpolationAlpha,
   );
+  drawSpectatorMinimap(world, snapshot, minX, minY, maxX, maxY);
 }
 
 function resolveCameraCenter(worldState: WorldInit, state: Snapshot): { x: number; y: number } {
+  if (isSpectator && spectatorCameraMode === 'free' && freeCameraCenter) {
+    return clampCameraCenter(worldState, freeCameraCenter.x, freeCameraCenter.y);
+  }
+
   const focus = resolveFocusPlayer(state);
   if (!focus) {
-    return { x: worldState.width / 2, y: worldState.height / 2 };
+    return clampCameraCenter(worldState, worldState.width / 2, worldState.height / 2);
   }
 
   const sector = sectorAt(worldState, state, focus.x, focus.y);
   if (!sector) {
-    return { x: focus.x + 0.5, y: focus.y + 0.5 };
+    return clampCameraCenter(worldState, focus.x + 0.5, focus.y + 0.5);
   }
 
+  return clampCameraCenter(worldState, sector.x + sector.size / 2, sector.y + sector.size / 2);
+}
+
+function clampCameraCenter(worldState: WorldInit, x: number, y: number): { x: number; y: number } {
+  const maxX = Math.max(0.5, worldState.width - 0.5);
+  const maxY = Math.max(0.5, worldState.height - 0.5);
   return {
-    x: sector.x + sector.size / 2,
-    y: sector.y + sector.size / 2,
+    x: clampNumber(x, 0.5, maxX),
+    y: clampNumber(y, 0.5, maxY),
   };
 }
 
@@ -1009,13 +1236,10 @@ function resolveFocusPlayer(state: Snapshot): PlayerView | null {
     return null;
   }
 
-  let follow = followPlayerId ? members.find((player) => player.id === followPlayerId) : undefined;
-  if (!follow) {
-    follow = [...members].sort((a, b) => b.score - a.score)[0];
-    followPlayerId = follow?.id ?? null;
+  if (!followPlayerId) {
+    return [...members].sort((a, b) => b.score - a.score)[0] ?? null;
   }
-
-  return follow ?? null;
+  return members.find((player) => player.id === followPlayerId) ?? null;
 }
 
 function drawGates(
@@ -1425,6 +1649,20 @@ function normalizeNumber(input: string | null, fallback: number, min: number, ma
     return fallback;
   }
   return clampNumber(Math.floor(n), min, max);
+}
+
+function isTypingInFormElement(target: EventTarget | null): boolean {
+  const candidates = [document.activeElement, target instanceof HTMLElement ? target : null];
+  return candidates.some((candidate) => {
+    if (!(candidate instanceof HTMLElement)) {
+      return false;
+    }
+    if (candidate.isContentEditable) {
+      return true;
+    }
+    const tag = candidate.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+  });
 }
 
 function clampNumber(value: number, min: number, max: number): number {
