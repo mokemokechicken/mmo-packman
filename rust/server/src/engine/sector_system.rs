@@ -3,8 +3,11 @@ use super::*;
 impl GameEngine {
     pub(super) fn update_sector_control(&mut self, dt_ms: u64, now_ms: u64) {
         for sector_id in 0..self.world.sectors.len() {
+            let capture_threshold = ((self.world.sectors[sector_id].view.total_dots as f32)
+                * self.large_party_capture_threshold_ratio())
+            .floor() as i32;
             if !self.world.sectors[sector_id].view.captured
-                && self.world.sectors[sector_id].view.dot_count <= 0
+                && self.world.sectors[sector_id].view.dot_count <= capture_threshold
             {
                 self.capture_sector(sector_id, now_ms);
             }
@@ -30,7 +33,11 @@ impl GameEngine {
             } else {
                 1.0
             };
-            let regen_rate = 0.33 * regen_multiplier * self.difficulty_multiplier.1 * invader_boost;
+            let regen_rate = 0.33
+                * regen_multiplier
+                * self.difficulty_multiplier.1
+                * invader_boost
+                * self.large_party_regen_relief_factor();
             self.world.sectors[sector_id].regen_accumulator += regen_rate * dt_sec;
 
             while self.world.sectors[sector_id].regen_accumulator >= 1.0 {
@@ -41,8 +48,9 @@ impl GameEngine {
                 self.world.sectors[sector_id].regen_accumulator -= 1.0;
             }
 
-            let threshold =
-                ((self.world.sectors[sector_id].view.total_dots as f32) * 0.05).floor() as i32;
+            let threshold = ((self.world.sectors[sector_id].view.total_dots as f32)
+                * self.large_party_loss_threshold_ratio())
+            .floor() as i32;
             if self.world.sectors[sector_id].view.dot_count > threshold.max(1) {
                 self.world.sectors[sector_id].view.captured = false;
                 self.world.sectors[sector_id].regen_accumulator = 0.0;
@@ -58,10 +66,12 @@ impl GameEngine {
             .iter()
             .filter(|p| p.view.state != PlayerState::Down)
             .count();
-        let target = ((self.max_ghosts as f32 * 0.5)
-            .max(active_players as f32 * (1.0 + ratio * 0.7)))
+        let (base_factor, active_base, active_ratio_factor, max_factor) =
+            self.large_party_ghost_target_profile();
+        let target = ((self.max_ghosts as f32 * base_factor)
+            .max(active_players as f32 * (active_base + ratio * active_ratio_factor)))
         .round();
-        let target = target.clamp(4.0, self.max_ghosts as f32) as usize;
+        let target = target.clamp(4.0, self.max_ghosts as f32 * max_factor) as usize;
 
         if self.ghosts.len() < target {
             let add = (target - self.ghosts.len()).min(3);
@@ -110,7 +120,7 @@ impl GameEngine {
             self.end_reason = Some(GameOverReason::Victory);
             self.timeline.push(TimelineEvent {
                 at_ms: self.elapsed_ms,
-                label: "全エリア制覇".to_string(),
+                label: "全エリア掌握".to_string(),
             });
             return;
         }
@@ -198,6 +208,122 @@ impl GameEngine {
 
         if best == Direction::None {
             random_direction(&mut self.rng)
+        } else {
+            best
+        }
+    }
+
+    pub(super) fn find_rescue_target(&self, player_idx: usize) -> Option<(usize, i32)> {
+        let player = self.players.get(player_idx)?;
+        self.players
+            .iter()
+            .enumerate()
+            .filter(|(idx, target)| *idx != player_idx && target.view.state == PlayerState::Down)
+            .map(|(idx, target)| {
+                (
+                    idx,
+                    manhattan(player.view.x, player.view.y, target.view.x, target.view.y),
+                )
+            })
+            .min_by_key(|(_, dist)| *dist)
+    }
+
+    pub(super) fn choose_rescue_direction(
+        &mut self,
+        x: i32,
+        y: i32,
+        tx: i32,
+        ty: i32,
+    ) -> Direction {
+        if x == tx && y == ty {
+            return Direction::None;
+        }
+        let dirs = [
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+            Direction::Right,
+        ];
+        let mut best = Direction::None;
+        let mut best_score = f32::NEG_INFINITY;
+
+        for dir in dirs {
+            let (nx, ny) = offset(x, y, dir);
+            if !self.can_move_between(x, y, nx, ny) {
+                continue;
+            }
+            let ghost_dist = self.distance_to_nearest_ghost(nx, ny).unwrap_or(99);
+            if ghost_dist <= 1 && (nx != tx || ny != ty) {
+                continue;
+            }
+            let mut score = -(manhattan(nx, ny, tx, ty) as f32) * 1.6;
+            score += ghost_dist as f32 * 0.9;
+            if ghost_dist <= 2 {
+                score -= 8.0;
+            }
+            score += self.rng.next_f32() * 0.2;
+            if score > best_score {
+                best_score = score;
+                best = dir;
+            }
+        }
+
+        if best == Direction::None {
+            self.choose_escape_direction(x, y)
+        } else {
+            best
+        }
+    }
+
+    pub(super) fn choose_safe_dot_direction(&mut self, x: i32, y: i32) -> Direction {
+        let dirs = [
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+            Direction::Right,
+        ];
+        let mut best = Direction::None;
+        let mut best_score = f32::NEG_INFINITY;
+        let nearest_dot = self
+            .world
+            .dots
+            .iter()
+            .min_by_key(|(dx, dy)| manhattan(x, y, *dx, *dy))
+            .cloned();
+
+        for dir in dirs {
+            let (nx, ny) = offset(x, y, dir);
+            if !self.can_move_between(x, y, nx, ny) {
+                continue;
+            }
+            let ghost_dist = self.distance_to_nearest_ghost(nx, ny).unwrap_or(99);
+            if ghost_dist <= 1 {
+                continue;
+            }
+
+            let mut score = 0.0;
+            if self.world.dots.contains(&(nx, ny)) {
+                score += 14.0;
+            }
+            if let Some((dx, dy)) = nearest_dot {
+                let before = manhattan(x, y, dx, dy);
+                let after = manhattan(nx, ny, dx, dy);
+                score += (before - after) as f32 * 1.0;
+            }
+            score += ghost_dist as f32 * 0.65;
+            if ghost_dist <= 2 {
+                score -= 7.0;
+            }
+            score += self.rng.next_f32() * 0.25;
+
+            if score > best_score {
+                best_score = score;
+                best = dir;
+            }
+        }
+
+        if best == Direction::None {
+            self.choose_escape_direction(x, y)
         } else {
             best
         }
