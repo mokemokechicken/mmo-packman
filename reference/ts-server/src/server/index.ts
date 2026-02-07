@@ -9,9 +9,11 @@ import type {
   ClientMessage,
   Difficulty,
   LobbyPlayer,
+  PingType,
   ServerMessage,
 } from '../shared/types.js';
 import { GameEngine, type StartPlayer } from './game.js';
+import { PingManager } from './ping_manager.js';
 
 interface ClientContext {
   id: string;
@@ -49,9 +51,11 @@ let hostId: string | null = null;
 let game: GameEngine | null = null;
 let loop: NodeJS.Timeout | null = null;
 let runningAiCount = 0;
+const pingManager = new PingManager();
 
 const DIFFICULTIES = new Set<Difficulty>(['casual', 'normal', 'hard', 'nightmare']);
 const MOVE_DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
+const PING_TYPES = new Set<PingType>(['focus', 'danger', 'help']);
 
 wss.on('connection', (ws) => {
   const clientId = randomUUID();
@@ -92,6 +96,11 @@ wss.on('connection', (ws) => {
 
     if (message.type === 'input' && game) {
       game.receiveInput(ctx.playerId, { dir: message.dir, awaken: message.awaken });
+      return;
+    }
+
+    if (message.type === 'place_ping') {
+      handlePlacePing(ctx.playerId, message.kind);
       return;
     }
   });
@@ -245,7 +254,7 @@ function sendWelcomeAndInitialState(ctx: ClientContext, member: LobbyPlayerInter
 
   send(ctx.ws, {
     type: 'state',
-    snapshot: game.buildSnapshot(false),
+    snapshot: withPings(game.buildSnapshot(false)),
   });
 }
 
@@ -296,6 +305,7 @@ function handleLobbyStart(
 
   const timeLimitMsOverride = normalizeTimeLimitMs(timeLimitMinutes);
   game = new GameEngine(startPlayers, difficulty, Date.now(), { timeLimitMsOverride });
+  pingManager.clear();
   runningAiCount = aiCount;
 
   for (const player of lobbyPlayers.values()) {
@@ -344,7 +354,7 @@ function handleLobbyStart(
     }
 
     running.step(TICK_MS);
-    const snapshot = running.buildSnapshot(true);
+    const snapshot = withPings(running.buildSnapshot(true));
     broadcast({ type: 'state', snapshot });
 
     if (running.isEnded()) {
@@ -358,6 +368,7 @@ function handleLobbyStart(
 
       game = null;
       runningAiCount = 0;
+      pingManager.clear();
 
       for (const player of lobbyPlayers.values()) {
         player.ai = false;
@@ -368,6 +379,47 @@ function handleLobbyStart(
       broadcastLobby('ゲーム終了。再スタート可能です');
     }
   }, TICK_MS);
+}
+
+function handlePlacePing(playerId: string, kind: PingType): void {
+  const running = game;
+  const member = lobbyPlayers.get(playerId);
+  const client = getClientByPlayerId(playerId);
+
+  if (!member || !client) {
+    return;
+  }
+
+  if (!running) {
+    send(client.ws, { type: 'error', message: 'game is not running' });
+    return;
+  }
+
+  if (member.spectator) {
+    send(client.ws, { type: 'error', message: 'spectator cannot place ping' });
+    return;
+  }
+
+  const position = running.getPlayerPosition(member.id);
+  if (!position) {
+    send(client.ws, { type: 'error', message: 'player is not in current game' });
+    return;
+  }
+
+  const result = pingManager.place({
+    ownerId: member.id,
+    ownerName: member.name,
+    x: Math.floor(position.x),
+    y: Math.floor(position.y),
+    kind,
+    nowMs: running.getNowMs(),
+    spectator: member.spectator,
+  });
+
+  if (!result.ok) {
+    send(client.ws, { type: 'error', message: result.reason ?? 'failed to place ping' });
+    return;
+  }
 }
 
 function broadcastLobby(note?: string): void {
@@ -499,6 +551,16 @@ function parseMessage(raw: string): ClientMessage | null {
       };
     }
 
+    if (value.type === 'place_ping') {
+      if (typeof value.kind !== 'string' || !PING_TYPES.has(value.kind as PingType)) {
+        return null;
+      }
+      return {
+        type: 'place_ping',
+        kind: value.kind as PingType,
+      };
+    }
+
     if (value.type === 'ping') {
       if (typeof value.t !== 'number' || !Number.isFinite(value.t)) {
         return null;
@@ -579,6 +641,11 @@ function normalizeTimeLimitMs(value: number | undefined): number | undefined {
   }
   const minutes = Math.max(1, Math.min(10, Math.floor(value)));
   return minutes * 60_000;
+}
+
+function withPings(snapshot: ReturnType<GameEngine['buildSnapshot']>): ReturnType<GameEngine['buildSnapshot']> {
+  snapshot.pings = pingManager.snapshot(snapshot.nowMs);
+  return snapshot;
 }
 
 function bindClientToPlayer(ctx: ClientContext, member: LobbyPlayerInternal): void {

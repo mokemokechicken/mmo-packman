@@ -5,6 +5,7 @@ export type SectorType = 'normal' | 'narrow' | 'plaza' | 'dark' | 'fast' | 'nest
 export type FruitType = 'cherry' | 'strawberry' | 'orange' | 'apple' | 'key' | 'grape';
 export type Difficulty = 'casual' | 'normal' | 'hard' | 'nightmare';
 export type GameOverReason = 'victory' | 'timeout' | 'all_down' | 'collapse';
+export type PingType = 'focus' | 'danger' | 'help';
 
 export interface Vec2 {
   x: number;
@@ -103,6 +104,17 @@ export interface FruitView {
   spawnedAt: number;
 }
 
+export interface PingView {
+  id: string;
+  ownerId: string;
+  ownerName: string;
+  x: number;
+  y: number;
+  kind: PingType;
+  createdAtMs: number;
+  expiresAtMs: number;
+}
+
 export interface TimelineEvent {
   atMs: number;
   label: string;
@@ -133,6 +145,7 @@ export interface Snapshot {
   fruits: FruitView[];
   sectors: SectorState[];
   gates: GateState[];
+  pings: PingView[];
   events: RuntimeEvent[];
   timeline: TimelineEvent[];
 }
@@ -173,6 +186,7 @@ export type ClientMessage =
   | { type: 'hello'; name: string; reconnectToken?: string; spectator?: boolean }
   | { type: 'lobby_start'; difficulty?: Difficulty; aiPlayerCount?: number; timeLimitMinutes?: number }
   | { type: 'input'; dir?: Exclude<Direction, 'none'>; awaken?: boolean }
+  | { type: 'place_ping'; kind: PingType }
   | { type: 'ping'; t: number };
 
 export type ServerMessage =
