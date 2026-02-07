@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::{HashSet, VecDeque};
 
 impl GameEngine {
     pub(super) fn update_sector_control(&mut self, dt_ms: u64, now_ms: u64) {
@@ -165,52 +166,22 @@ impl GameEngine {
     }
 
     pub(super) fn choose_dot_direction(&mut self, x: i32, y: i32) -> Direction {
-        let dirs = [
-            Direction::Up,
-            Direction::Down,
-            Direction::Left,
-            Direction::Right,
-        ];
-        let mut best = Direction::None;
-        let mut best_score = f32::NEG_INFINITY;
+        if let Some(dir) = self
+            .find_shortest_path_direction(x, y, 28, 0, |nx, ny| self.world.dots.contains(&(nx, ny)))
+        {
+            return dir;
+        }
 
-        let nearest_dot = self
+        if let Some((tx, ty)) = self
             .world
             .dots
             .iter()
             .min_by_key(|(dx, dy)| manhattan(x, y, *dx, *dy))
-            .cloned();
-
-        for dir in dirs {
-            let (nx, ny) = offset(x, y, dir);
-            if !self.can_move_between(x, y, nx, ny) {
-                continue;
-            }
-            let mut score = 0.0;
-            if self.world.dots.contains(&(nx, ny)) {
-                score += 12.0;
-            }
-            if let Some((dx, dy)) = nearest_dot {
-                let before = manhattan(x, y, dx, dy);
-                let after = manhattan(nx, ny, dx, dy);
-                score += (before - after) as f32 * 0.9;
-            }
-            if let Some(ghost_dist) = self.distance_to_nearest_ghost(nx, ny) {
-                score += ghost_dist as f32 * 0.15;
-            }
-            score += self.rng.next_f32() * 0.4;
-
-            if score > best_score {
-                best_score = score;
-                best = dir;
-            }
+            .copied()
+        {
+            return self.choose_toward_direction(x, y, tx, ty);
         }
-
-        if best == Direction::None {
-            random_direction(&mut self.rng)
-        } else {
-            best
-        }
+        random_direction(&mut self.rng)
     }
 
     pub(super) fn find_rescue_target(&self, player_idx: usize) -> Option<(usize, i32)> {
@@ -238,95 +209,32 @@ impl GameEngine {
         if x == tx && y == ty {
             return Direction::None;
         }
-        let dirs = [
-            Direction::Up,
-            Direction::Down,
-            Direction::Left,
-            Direction::Right,
-        ];
-        let mut best = Direction::None;
-        let mut best_score = f32::NEG_INFINITY;
 
-        for dir in dirs {
-            let (nx, ny) = offset(x, y, dir);
-            if !self.can_move_between(x, y, nx, ny) {
-                continue;
-            }
-            let ghost_dist = self.distance_to_nearest_ghost(nx, ny).unwrap_or(99);
-            if ghost_dist <= 1 && (nx != tx || ny != ty) {
-                continue;
-            }
-            let mut score = -(manhattan(nx, ny, tx, ty) as f32) * 1.6;
-            score += ghost_dist as f32 * 0.9;
-            if ghost_dist <= 2 {
-                score -= 8.0;
-            }
-            score += self.rng.next_f32() * 0.2;
-            if score > best_score {
-                best_score = score;
-                best = dir;
-            }
+        if let Some(dir) =
+            self.find_shortest_path_direction(x, y, 36, 2, |nx, ny| nx == tx && ny == ty)
+        {
+            return dir;
         }
-
-        if best == Direction::None {
-            self.choose_escape_direction(x, y)
-        } else {
-            best
+        if let Some(dir) =
+            self.find_shortest_path_direction(x, y, 36, 0, |nx, ny| nx == tx && ny == ty)
+        {
+            return dir;
         }
+        self.choose_escape_direction(x, y)
     }
 
     pub(super) fn choose_safe_dot_direction(&mut self, x: i32, y: i32) -> Direction {
-        let dirs = [
-            Direction::Up,
-            Direction::Down,
-            Direction::Left,
-            Direction::Right,
-        ];
-        let mut best = Direction::None;
-        let mut best_score = f32::NEG_INFINITY;
-        let nearest_dot = self
-            .world
-            .dots
-            .iter()
-            .min_by_key(|(dx, dy)| manhattan(x, y, *dx, *dy))
-            .cloned();
-
-        for dir in dirs {
+        if let Some(dir) = self
+            .find_shortest_path_direction(x, y, 28, 2, |nx, ny| self.world.dots.contains(&(nx, ny)))
+        {
             let (nx, ny) = offset(x, y, dir);
-            if !self.can_move_between(x, y, nx, ny) {
-                continue;
-            }
             let ghost_dist = self.distance_to_nearest_ghost(nx, ny).unwrap_or(99);
-            if ghost_dist <= 1 {
-                continue;
-            }
-
-            let mut score = 0.0;
-            if self.world.dots.contains(&(nx, ny)) {
-                score += 14.0;
-            }
-            if let Some((dx, dy)) = nearest_dot {
-                let before = manhattan(x, y, dx, dy);
-                let after = manhattan(nx, ny, dx, dy);
-                score += (before - after) as f32 * 1.0;
-            }
-            score += ghost_dist as f32 * 0.65;
-            if ghost_dist <= 2 {
-                score -= 7.0;
-            }
-            score += self.rng.next_f32() * 0.25;
-
-            if score > best_score {
-                best_score = score;
-                best = dir;
+            if ghost_dist > 1 {
+                return dir;
             }
         }
 
-        if best == Direction::None {
-            self.choose_escape_direction(x, y)
-        } else {
-            best
-        }
+        self.choose_escape_direction(x, y)
     }
 
     pub(super) fn choose_escape_direction(&mut self, x: i32, y: i32) -> Direction {
@@ -362,9 +270,87 @@ impl GameEngine {
             .iter()
             .min_by_key(|ghost| manhattan(x, y, ghost.view.x, ghost.view.y))
         {
+            if let Some(dir) = self.find_shortest_path_direction(x, y, 32, 0, |nx, ny| {
+                nx == ghost.view.x && ny == ghost.view.y
+            }) {
+                return dir;
+            }
             return self.choose_toward_direction(x, y, ghost.view.x, ghost.view.y);
         }
         random_direction(&mut self.rng)
+    }
+
+    pub(super) fn find_shortest_path_direction<F>(
+        &self,
+        x: i32,
+        y: i32,
+        max_depth: i32,
+        min_ghost_distance: i32,
+        mut is_goal: F,
+    ) -> Option<Direction>
+    where
+        F: FnMut(i32, i32) -> bool,
+    {
+        if max_depth <= 0 {
+            return None;
+        }
+
+        let directions = [
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+            Direction::Right,
+        ];
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        visited.insert((x, y));
+
+        for dir in directions {
+            let (nx, ny) = offset(x, y, dir);
+            if !self.can_move_between(x, y, nx, ny) {
+                continue;
+            }
+            if min_ghost_distance > 0 {
+                let ghost_dist = self.distance_to_nearest_ghost(nx, ny).unwrap_or(99);
+                if ghost_dist < min_ghost_distance && !is_goal(nx, ny) {
+                    continue;
+                }
+            }
+            if is_goal(nx, ny) {
+                return Some(dir);
+            }
+            if visited.insert((nx, ny)) {
+                queue.push_back((nx, ny, dir, 1));
+            }
+        }
+
+        while let Some((cx, cy, first_dir, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+
+            for dir in directions {
+                let (nx, ny) = offset(cx, cy, dir);
+                if !self.can_move_between(cx, cy, nx, ny) {
+                    continue;
+                }
+                if min_ghost_distance > 0 {
+                    let ghost_dist = self.distance_to_nearest_ghost(nx, ny).unwrap_or(99);
+                    if ghost_dist < min_ghost_distance && !is_goal(nx, ny) {
+                        continue;
+                    }
+                }
+                if !visited.insert((nx, ny)) {
+                    continue;
+                }
+                if is_goal(nx, ny) {
+                    return Some(first_dir);
+                }
+                queue.push_back((nx, ny, first_dir, depth + 1));
+            }
+        }
+
+        None
     }
 
     pub(super) fn choose_toward_direction(

@@ -56,6 +56,8 @@ interface LocalPlayerPredictionState {
   dir: Direction;
   desiredDir: Direction;
   moveBuffer: number;
+  renderCorrectionX: number;
+  renderCorrectionY: number;
   lastUpdateMs: number;
   lastSnapshotTick: number;
 }
@@ -2475,12 +2477,15 @@ function syncLocalPlayerPredictionFromSnapshot(nextSnapshot: Snapshot): void {
       dir: me.dir,
       desiredDir,
       moveBuffer: 0,
+      renderCorrectionX: 0,
+      renderCorrectionY: 0,
       lastUpdateMs: nowMs,
       lastSnapshotTick: nextSnapshot.tick,
     };
     return;
   }
 
+  const previousVisual = renderPositionFromPrediction(localPlayerPrediction, world, nextSnapshot);
   localPlayerPrediction.desiredDir = desiredDir;
   localPlayerPrediction.lastUpdateMs = nowMs;
   localPlayerPrediction.lastSnapshotTick = nextSnapshot.tick;
@@ -2492,16 +2497,19 @@ function syncLocalPlayerPredictionFromSnapshot(nextSnapshot: Snapshot): void {
     localPlayerPrediction.y = me.y;
     localPlayerPrediction.dir = me.dir;
     localPlayerPrediction.moveBuffer = 0;
-    return;
   }
 
-  // Keep local phase when the server is only 0-1 cell away to avoid oscillation.
-  if (drift === 1 && me.dir === 'none' && desiredDir === 'none') {
-    localPlayerPrediction.x = me.x;
-    localPlayerPrediction.y = me.y;
-    localPlayerPrediction.dir = me.dir;
-    localPlayerPrediction.moveBuffer = 0;
-  }
+  const nextVisual = renderPositionFromPrediction(localPlayerPrediction, world, nextSnapshot);
+  localPlayerPrediction.renderCorrectionX = clampNumber(
+    localPlayerPrediction.renderCorrectionX + (previousVisual.x - nextVisual.x),
+    -1.2,
+    1.2,
+  );
+  localPlayerPrediction.renderCorrectionY = clampNumber(
+    localPlayerPrediction.renderCorrectionY + (previousVisual.y - nextVisual.y),
+    -1.2,
+    1.2,
+  );
 }
 
 function updateLocalPlayerPrediction(nowMs: number): void {
@@ -2519,6 +2527,8 @@ function updateLocalPlayerPrediction(nowMs: number): void {
     localPlayerPrediction.y = me.y;
     localPlayerPrediction.dir = 'none';
     localPlayerPrediction.moveBuffer = 0;
+    localPlayerPrediction.renderCorrectionX = 0;
+    localPlayerPrediction.renderCorrectionY = 0;
     localPlayerPrediction.lastUpdateMs = nowMs;
     return;
   }
@@ -2527,6 +2537,15 @@ function updateLocalPlayerPrediction(nowMs: number): void {
   localPlayerPrediction.lastUpdateMs = nowMs;
   localPlayerPrediction.desiredDir = currentDir !== 'none' ? currentDir : localPlayerPrediction.desiredDir;
   localPlayerPrediction.moveBuffer += resolvePredictedPlayerSpeed(me, localPlayerPrediction.x, localPlayerPrediction.y) * dtSec;
+  const correctionDecay = clampNumber(1 - dtSec * 12, 0, 1);
+  localPlayerPrediction.renderCorrectionX *= correctionDecay;
+  localPlayerPrediction.renderCorrectionY *= correctionDecay;
+  if (Math.abs(localPlayerPrediction.renderCorrectionX) < 0.001) {
+    localPlayerPrediction.renderCorrectionX = 0;
+  }
+  if (Math.abs(localPlayerPrediction.renderCorrectionY) < 0.001) {
+    localPlayerPrediction.renderCorrectionY = 0;
+  }
 
   let safety = 0;
   while (localPlayerPrediction.moveBuffer >= 1 && safety < 6) {
@@ -2576,23 +2595,34 @@ function getLocalPlayerRenderPosition(worldState: WorldInit, state: Snapshot): {
     return { x: me.x, y: me.y };
   }
 
+  return renderPositionFromPrediction(localPlayerPrediction, worldState, state);
+}
+
+function renderPositionFromPrediction(
+  prediction: LocalPlayerPredictionState,
+  worldState: WorldInit,
+  state: Snapshot,
+): { x: number; y: number } {
   const nextDir = resolveStepDirectionForPosition(
-    localPlayerPrediction.x,
-    localPlayerPrediction.y,
-    localPlayerPrediction.desiredDir,
-    localPlayerPrediction.dir,
+    prediction.x,
+    prediction.y,
+    prediction.desiredDir,
+    prediction.dir,
     worldState,
     state.gates,
   );
   if (nextDir === 'none') {
-    return { x: localPlayerPrediction.x, y: localPlayerPrediction.y };
+    return {
+      x: prediction.x + prediction.renderCorrectionX,
+      y: prediction.y + prediction.renderCorrectionY,
+    };
   }
 
   const vector = DIRECTION_VECTORS[nextDir];
-  const progress = clampNumber(localPlayerPrediction.moveBuffer, 0, 0.999);
+  const progress = clampNumber(prediction.moveBuffer, 0, 0.999);
   return {
-    x: localPlayerPrediction.x + vector.x * progress,
-    y: localPlayerPrediction.y + vector.y * progress,
+    x: prediction.x + vector.x * progress + prediction.renderCorrectionX,
+    y: prediction.y + vector.y * progress + prediction.renderCorrectionY,
   };
 }
 
