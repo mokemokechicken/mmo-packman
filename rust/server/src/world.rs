@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use crate::constants::{get_map_side_by_player_count, SECTOR_SIZE};
 use crate::rng::Rng;
@@ -97,14 +97,12 @@ pub fn generate_world(player_count: usize, seed: u32) -> GeneratedWorld {
         }
     }
 
-    let mut pellet_keys = HashSet::new();
     let mut power_pellets = BTreeMap::new();
     for sector in &mut sectors {
         scan_sector_floor_cells(&grid, sector);
         let pellets = place_sector_power_pellets(sector, &mut rng);
         for pos in pellets {
             let key = key_of(pos.x, pos.y);
-            pellet_keys.insert((pos.x, pos.y));
             power_pellets.insert(
                 key.clone(),
                 PowerPelletInternal {
@@ -120,6 +118,14 @@ pub fn generate_world(player_count: usize, seed: u32) -> GeneratedWorld {
 
     let player_spawn_cells = collect_player_spawns(&sectors, side);
     let ghost_spawn_cells = collect_ghost_spawns(&sectors, side, &player_spawn_cells);
+    let primary_spawn = player_spawn_cells
+        .first()
+        .copied()
+        .or_else(|| sectors.iter().find_map(|sector| sector.floor_cells.first().copied()));
+    let reachable_floor_cells = build_reachable_floor_cells(&grid, width, height, primary_spawn);
+
+    power_pellets.retain(|_, pellet| reachable_floor_cells.contains(&(pellet.x, pellet.y)));
+    let pellet_keys: HashSet<(i32, i32)> = power_pellets.values().map(|pellet| (pellet.x, pellet.y)).collect();
 
     let mut spawn_protected = HashSet::new();
     for spawn in &player_spawn_cells {
@@ -140,7 +146,8 @@ pub fn generate_world(player_count: usize, seed: u32) -> GeneratedWorld {
     for sector in &mut sectors {
         let mut dot_count = 0;
         for cell in &sector.floor_cells {
-            if pellet_keys.contains(&(cell.x, cell.y))
+            if !reachable_floor_cells.contains(&(cell.x, cell.y))
+                || pellet_keys.contains(&(cell.x, cell.y))
                 || spawn_protected.contains(&(cell.x, cell.y))
                 || gate_switch_cells.contains(&(cell.x, cell.y))
             {
@@ -155,7 +162,8 @@ pub fn generate_world(player_count: usize, seed: u32) -> GeneratedWorld {
             .floor_cells
             .iter()
             .filter(|cell| {
-                !pellet_keys.contains(&(cell.x, cell.y))
+                reachable_floor_cells.contains(&(cell.x, cell.y))
+                    && !pellet_keys.contains(&(cell.x, cell.y))
                     && !spawn_protected.contains(&(cell.x, cell.y))
                     && !gate_switch_cells.contains(&(cell.x, cell.y))
             })
@@ -447,7 +455,14 @@ fn collect_player_spawns(sectors: &[SectorInternal], side: i32) -> Vec<Vec2> {
     }
 
     if out.is_empty() {
-        out.push(Vec2 { x: 1, y: 1 });
+        let fallback = sectors
+            .iter()
+            .find_map(|sector| sector.floor_cells.first().copied())
+            .unwrap_or(Vec2 {
+                x: SECTOR_SIZE / 2,
+                y: SECTOR_SIZE / 2,
+            });
+        out.push(fallback);
     }
     dedupe_vec2(out)
 }
@@ -548,11 +563,80 @@ fn dedupe_vec2(values: Vec<Vec2>) -> Vec<Vec2> {
     out
 }
 
+fn build_reachable_floor_cells(
+    grid: &[Vec<char>],
+    width: i32,
+    height: i32,
+    start: Option<Vec2>,
+) -> HashSet<(i32, i32)> {
+    let mut out = HashSet::new();
+    let Some(start) = start else {
+        return out;
+    };
+    if start.x < 0 || start.y < 0 || start.x >= width || start.y >= height {
+        return out;
+    }
+    if grid[start.y as usize][start.x as usize] != '.' {
+        return out;
+    }
+
+    let mut queue = VecDeque::new();
+    out.insert((start.x, start.y));
+    queue.push_back((start.x, start.y));
+
+    while let Some((x, y)) = queue.pop_front() {
+        for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+            if nx < 0 || ny < 0 || nx >= width || ny >= height {
+                continue;
+            }
+            if grid[ny as usize][nx as usize] != '.' {
+                continue;
+            }
+            if out.insert((nx, ny)) {
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashSet, VecDeque};
+
     use crate::constants::SECTOR_SIZE;
 
     use super::{generate_world, is_walkable};
+
+    fn reachable_from_primary_spawn(
+        world: &super::GeneratedWorld,
+    ) -> HashSet<(i32, i32)> {
+        let mut out = HashSet::new();
+        let Some(start) = world.player_spawn_cells.first().copied() else {
+            return out;
+        };
+        if !is_walkable(world, start.x, start.y) {
+            return out;
+        }
+
+        let mut queue = VecDeque::new();
+        out.insert((start.x, start.y));
+        queue.push_back((start.x, start.y));
+
+        while let Some((x, y)) = queue.pop_front() {
+            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                if !is_walkable(world, nx, ny) {
+                    continue;
+                }
+                if out.insert((nx, ny)) {
+                    queue.push_back((nx, ny));
+                }
+            }
+        }
+
+        out
+    }
 
     #[test]
     fn gate_cells_are_walkable_when_generated() {
@@ -632,6 +716,30 @@ mod tests {
                     .iter()
                     .any(|player_spawn| player_spawn == ghost_spawn);
                 assert!(!overlap);
+            }
+        }
+    }
+
+    #[test]
+    fn dots_and_pellets_are_reachable_from_primary_spawn() {
+        for seed in 0..200u32 {
+            let world = generate_world(10, seed);
+            let reachable = reachable_from_primary_spawn(&world);
+
+            for &(x, y) in &world.dots {
+                assert!(
+                    reachable.contains(&(x, y)),
+                    "dot is unreachable: seed={seed}, pos=({x},{y})"
+                );
+            }
+
+            for pellet in world.power_pellets.values() {
+                assert!(
+                    reachable.contains(&(pellet.x, pellet.y)),
+                    "pellet is unreachable: seed={seed}, pos=({},{})",
+                    pellet.x,
+                    pellet.y
+                );
             }
         }
     }

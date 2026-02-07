@@ -17,6 +17,7 @@ impl Direction {
             "down" => Some(Self::Down),
             "left" => Some(Self::Left),
             "right" => Some(Self::Right),
+            "none" => Some(Self::None),
             _ => None,
         }
     }

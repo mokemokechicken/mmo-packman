@@ -1113,6 +1113,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_input_accepts_none_direction() {
+        let parsed = parse_client_message(r#"{"type":"input","dir":"none"}"#);
+        assert!(matches!(
+            parsed,
+            Some(ParsedClientMessage::Input {
+                dir: Some(Direction::None),
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn parse_ping_requires_finite_number() {
         let parsed = parse_client_message(r#"{"type":"ping","t":12.5}"#);
         assert!(matches!(parsed, Some(ParsedClientMessage::Ping { .. })));

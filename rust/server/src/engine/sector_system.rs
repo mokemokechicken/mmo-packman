@@ -418,15 +418,7 @@ impl GameEngine {
             return;
         }
 
-        let fallback = random_direction(&mut self.rng);
-        let (fx, fy) = offset(from_x, from_y, fallback);
-        if self.can_move_between(from_x, from_y, fx, fy) {
-            self.players[idx].view.x = fx;
-            self.players[idx].view.y = fy;
-            self.players[idx].view.dir = fallback;
-        } else {
-            self.players[idx].view.dir = Direction::None;
-        }
+        self.players[idx].view.dir = Direction::None;
     }
 
     pub(super) fn apply_player_pickups(&mut self, idx: usize, now_ms: u64) {

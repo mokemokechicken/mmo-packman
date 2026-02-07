@@ -304,6 +304,9 @@ impl GameEngine {
         }
         if let Some(direction) = dir {
             player.desired_dir = direction;
+            if direction == Direction::None {
+                player.view.dir = Direction::None;
+            }
         }
         if awaken.unwrap_or(false) {
             player.awaken_requested = true;
@@ -1144,6 +1147,77 @@ mod tests {
                 assert_eq!(a.is_ended(), b.is_ended());
                 break;
             }
+        }
+    }
+
+    #[test]
+    fn player_without_input_stays_in_place() {
+        let players = vec![StartPlayer {
+            id: "p1".to_string(),
+            name: "P1".to_string(),
+            reconnect_token: "token_1".to_string(),
+            connected: true,
+        }];
+        let mut engine = GameEngine::new(
+            players,
+            Difficulty::Normal,
+            777,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        let start_x = engine.players[0].view.x;
+        let start_y = engine.players[0].view.y;
+
+        for _ in 0..20 {
+            engine.step(TICK_MS);
+        }
+
+        assert_eq!(engine.players[0].view.x, start_x);
+        assert_eq!(engine.players[0].view.y, start_y);
+        assert_eq!(engine.players[0].view.dir as u8, Direction::None as u8);
+    }
+
+    #[test]
+    fn player_stops_after_none_input() {
+        let players = vec![StartPlayer {
+            id: "p1".to_string(),
+            name: "P1".to_string(),
+            reconnect_token: "token_1".to_string(),
+            connected: true,
+        }];
+        let mut engine = GameEngine::new(
+            players,
+            Difficulty::Normal,
+            778,
+            GameEngineOptions {
+                time_limit_ms_override: Some(60_000),
+            },
+        );
+        let player_id = engine.players[0].view.id.clone();
+        let (dir, _, _) =
+            first_walkable_neighbor(&engine, engine.players[0].view.x, engine.players[0].view.y);
+
+        engine.receive_input(&player_id, Some(dir), None);
+        let mut moved = false;
+        for _ in 0..20 {
+            let before = (engine.players[0].view.x, engine.players[0].view.y);
+            engine.step(TICK_MS);
+            let after = (engine.players[0].view.x, engine.players[0].view.y);
+            if after != before {
+                moved = true;
+                break;
+            }
+        }
+        assert!(moved);
+
+        engine.receive_input(&player_id, Some(Direction::None), None);
+        let stop_x = engine.players[0].view.x;
+        let stop_y = engine.players[0].view.y;
+        for _ in 0..20 {
+            engine.step(TICK_MS);
+            assert_eq!(engine.players[0].view.x, stop_x);
+            assert_eq!(engine.players[0].view.y, stop_y);
         }
     }
 

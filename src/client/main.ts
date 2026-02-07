@@ -40,6 +40,8 @@ interface InterpolationState {
   toX: number;
   toY: number;
   updatedAtMs: number;
+  durationMs: number;
+  lastMoveAtMs: number;
 }
 
 type SpectatorCameraMode = 'follow' | 'free';
@@ -109,7 +111,6 @@ let spectatorZoom = 1;
 let freeCameraCenter: { x: number; y: number } | null = null;
 let spectatorMinimapCanvas: HTMLCanvasElement | null = null;
 let spectatorMinimapCtx: CanvasRenderingContext2D | null = null;
-let latestSnapshotReceivedAtMs = performance.now();
 const playerInterpolation = new Map<string, InterpolationState>();
 const ghostInterpolation = new Map<string, InterpolationState>();
 
@@ -207,7 +208,12 @@ function handleServerMessage(message: ServerMessage): void {
     isHost = message.hostId === sessionId;
     lobbyMessage = message.note ?? '';
     void fetchRankingBoard();
-    renderLobby(message.players, message.running, message.canStart, message.spectatorCount);
+    const inRunningMatch = message.running && !!world && !!snapshot && meId.length > 0;
+    if (inRunningMatch) {
+      lobby.classList.add('hidden');
+    } else {
+      renderLobby(message.players, message.running, message.canStart, message.spectatorCount);
+    }
     updateStatusPanels();
     return;
   }
@@ -234,7 +240,6 @@ function handleServerMessage(message: ServerMessage): void {
     freeCameraCenter = null;
     playerInterpolation.clear();
     ghostInterpolation.clear();
-    latestSnapshotReceivedAtMs = performance.now();
     dotSet.clear();
     pelletMap.clear();
 
@@ -761,6 +766,15 @@ function wireKeyboard(): void {
     v: 'danger',
     b: 'help',
   };
+  const pressedDirs: Array<'up' | 'down' | 'left' | 'right'> = [];
+
+  const syncDirectionInput = (): void => {
+    const nextDir = pressedDirs.length > 0 ? pressedDirs[pressedDirs.length - 1] : 'none';
+    if (nextDir !== currentDir) {
+      currentDir = nextDir;
+      send({ type: 'input', dir: nextDir });
+    }
+  };
 
   window.addEventListener('keydown', (event) => {
     const rawKey = event.key;
@@ -807,9 +821,11 @@ function wireKeyboard(): void {
     }
 
     const dir = dirMap[key];
-    if (dir && dir !== currentDir) {
-      currentDir = dir;
-      send({ type: 'input', dir });
+    if (dir) {
+      if (!pressedDirs.includes(dir)) {
+        pressedDirs.push(dir);
+      }
+      syncDirectionInput();
     }
 
     if (key === ' ' || key === 'e' || key === 'Enter') {
@@ -819,9 +835,21 @@ function wireKeyboard(): void {
 
   window.addEventListener('keyup', (event) => {
     const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
-    if (key in dirMap) {
-      currentDir = 'none';
+    const dir = dirMap[key];
+    if (dir) {
+      const nextPressed = pressedDirs.filter((value) => value !== dir);
+      pressedDirs.length = 0;
+      pressedDirs.push(...nextPressed);
+      syncDirectionInput();
     }
+  });
+
+  window.addEventListener('blur', () => {
+    if (pressedDirs.length === 0 && currentDir === 'none') {
+      return;
+    }
+    pressedDirs.length = 0;
+    syncDirectionInput();
   });
 }
 
@@ -915,21 +943,24 @@ function cycleSpectatorTarget(delta = 1): void {
 
 function initSpectatorControls(): void {
   spectatorControls.innerHTML = `
-    <div class="spec-title">観戦ターゲット</div>
-    <div class="spec-row">
-      <button id="spectator-prev" type="button">◀</button>
-      <span id="spectator-target">auto</span>
-      <button id="spectator-next" type="button">▶</button>
-    </div>
-    <div class="spec-row">
-      <button id="spectator-mode" type="button">追従モード</button>
-      <button id="spectator-zoom-out" type="button">-</button>
-      <span id="spectator-zoom">100%</span>
-      <button id="spectator-zoom-in" type="button">+</button>
+    <div id="minimap-title" class="spec-title">ミニマップ</div>
+    <div id="spectator-toolbar">
+      <div class="spec-row">
+        <button id="spectator-prev" type="button">◀</button>
+        <span id="spectator-target">auto</span>
+        <button id="spectator-next" type="button">▶</button>
+      </div>
+      <div class="spec-row">
+        <button id="spectator-mode" type="button">追従モード</button>
+        <button id="spectator-zoom-out" type="button">-</button>
+        <span id="spectator-zoom">100%</span>
+        <button id="spectator-zoom-in" type="button">+</button>
+      </div>
+      <div class="hint spectator-hint">Tab / ] / E: 次, [ / Q: 前, WASD/矢印: パン, +/-: ズーム</div>
+      <div class="hint spectator-hint">ミニマップをクリックでフォーカス切替/自由カメラ移動</div>
     </div>
     <canvas id="spectator-minimap" width="220" height="220"></canvas>
-    <div class="hint">Tab / ] / E: 次, [ / Q: 前, WASD/矢印: パン, +/-: ズーム</div>
-    <div class="hint">ミニマップをクリックでフォーカス切替/自由カメラ移動</div>
+    <div id="minimap-legend" class="hint"></div>
   `;
 
   const prev = document.getElementById('spectator-prev');
@@ -1049,7 +1080,7 @@ function drawSpectatorMinimap(
   maxX: number,
   maxY: number,
 ): void {
-  if (!isSpectator || !spectatorMinimapCanvas || !spectatorMinimapCtx) {
+  if (!spectatorMinimapCanvas || !spectatorMinimapCtx) {
     return;
   }
   const miniWidth = spectatorMinimapCanvas.width;
@@ -1064,29 +1095,81 @@ function drawSpectatorMinimap(
   miniCtx.strokeStyle = 'rgba(160, 198, 255, 0.28)';
   miniCtx.strokeRect(0, 0, miniWidth, miniHeight);
 
+  const blinkOn = Math.floor(performance.now() / 320) % 2 === 0;
   for (const sector of state.sectors) {
     const x = sector.x * mapScaleX;
     const y = sector.y * mapScaleY;
     const width = Math.max(1, sector.size * mapScaleX);
     const height = Math.max(1, sector.size * mapScaleY);
     if (!sector.discovered) {
-      miniCtx.fillStyle = '#090b12';
+      miniCtx.fillStyle = '#1a1f29';
     } else if (sector.captured) {
-      miniCtx.fillStyle = '#184b66';
+      miniCtx.fillStyle = sector.dotCount > 0
+        ? blinkOn
+          ? '#f4c649'
+          : '#5f94e0'
+        : '#54b8ff';
     } else {
-      miniCtx.fillStyle = '#13213b';
+      miniCtx.fillStyle = '#2c3138';
     }
     miniCtx.fillRect(x, y, width, height);
+
+    if (!sector.discovered && width >= 10 && height >= 10) {
+      miniCtx.fillStyle = 'rgba(235, 241, 255, 0.85)';
+      miniCtx.font = `${Math.max(8, Math.floor(Math.min(width, height) * 0.42))}px monospace`;
+      miniCtx.fillText('?', x + width * 0.34, y + height * 0.64);
+    }
+  }
+
+  for (const ghost of state.ghosts) {
+    const sector = sectorAt(worldState, state, ghost.x, ghost.y);
+    if (!sector?.captured) {
+      continue;
+    }
+    const gx = (ghost.x + 0.5) * mapScaleX;
+    const gy = (ghost.y + 0.5) * mapScaleY;
+    miniCtx.beginPath();
+    miniCtx.arc(gx, gy, ghost.type === 'boss' ? 3.8 : 2.2, 0, Math.PI * 2);
+    miniCtx.fillStyle = ghost.type === 'boss' ? '#ff4052' : '#ff7480';
+    miniCtx.fill();
+  }
+
+  for (const gate of worldState.gates) {
+    if (gate.open) {
+      continue;
+    }
+    const cx = ((gate.a.x + gate.b.x) * 0.5 + 0.5) * mapScaleX;
+    const cy = ((gate.a.y + gate.b.y) * 0.5 + 0.5) * mapScaleY;
+    miniCtx.strokeStyle = 'rgba(255, 210, 98, 0.95)';
+    miniCtx.lineWidth = 1.1;
+    miniCtx.beginPath();
+    miniCtx.arc(cx, cy - 1.2, 1.8, Math.PI, 0);
+    miniCtx.stroke();
+    miniCtx.fillStyle = 'rgba(255, 210, 98, 0.95)';
+    miniCtx.fillRect(cx - 1.5, cy - 1, 3, 3);
   }
 
   for (const player of state.players) {
     const px = (player.x + 0.5) * mapScaleX;
     const py = (player.y + 0.5) * mapScaleY;
+    if (player.state === 'down') {
+      miniCtx.beginPath();
+      miniCtx.arc(px, py, Math.floor(performance.now() / 250) % 2 === 0 ? 3.8 : 2.2, 0, Math.PI * 2);
+      miniCtx.fillStyle = '#ff4e57';
+      miniCtx.fill();
+      miniCtx.fillStyle = 'rgba(255, 239, 184, 0.95)';
+      miniCtx.font = '8px monospace';
+      miniCtx.fillText('★'.repeat(Math.max(1, Math.min(3, player.stocks))), px + 2.8, py - 2.2);
+      continue;
+    }
+
+    const isMe = player.id === meId;
+    const highlight = isSpectator && player.id === followPlayerId;
     miniCtx.beginPath();
-    miniCtx.arc(px, py, 3.2, 0, Math.PI * 2);
-    miniCtx.fillStyle = player.id === followPlayerId ? '#ffe784' : '#ffb36c';
+    miniCtx.arc(px, py, isMe ? 3.6 : 2.9, 0, Math.PI * 2);
+    miniCtx.fillStyle = isMe ? '#f6fbff' : '#ffd667';
     miniCtx.fill();
-    if (player.id === followPlayerId) {
+    if (highlight) {
       miniCtx.beginPath();
       miniCtx.arc(px, py, 5.2, 0, Math.PI * 2);
       miniCtx.strokeStyle = 'rgba(255, 240, 174, 0.9)';
@@ -1351,12 +1434,33 @@ function updateTopStatus(): void {
 }
 
 function updateSpectatorControls(): void {
-  if (!isSpectator || !snapshot) {
+  if (!snapshot || !world) {
     spectatorControls.classList.add('hidden');
     return;
   }
 
   spectatorControls.classList.remove('hidden');
+  spectatorControls.classList.toggle('spectator-mode', isSpectator);
+
+  const title = document.getElementById('minimap-title');
+  if (title) {
+    title.textContent = isSpectator ? '観戦ミニマップ' : 'ミニマップ';
+  }
+
+  const toolbar = document.getElementById('spectator-toolbar');
+  toolbar?.classList.toggle('hidden', !isSpectator);
+
+  const legend = document.getElementById('minimap-legend');
+  if (legend) {
+    legend.textContent = isSpectator
+      ? '白:自分  黄:プレイヤー  赤:ダウン  赤点:ゴースト(制覇エリア)  黄点滅:劣化中'
+      : '白:自分  黄:味方  赤点滅:ダウン  赤点:ゴースト(制覇エリア)  黄点滅:劣化中';
+  }
+
+  if (!isSpectator) {
+    return;
+  }
+
   const targetText = document.getElementById('spectator-target');
   if (targetText) {
     targetText.textContent = currentFollowName(snapshot.players);
@@ -1516,7 +1620,6 @@ function setReplayFrameIndex(index: number): void {
   replayPlayback.frameIndex = safeIndex;
   snapshot = cloneSnapshot(frame.snapshot);
   restoreReplayBoardState(frame);
-  latestSnapshotReceivedAtMs = performance.now();
   playerInterpolation.clear();
   ghostInterpolation.clear();
   updateStatusPanels();
@@ -1612,7 +1715,6 @@ function closeReplay(): void {
   replaySavedCameraMode = null;
   replaySavedFollowPlayerId = null;
   updateTouchControlsVisibility();
-  latestSnapshotReceivedAtMs = performance.now();
   playerInterpolation.clear();
   ghostInterpolation.clear();
   updateStatusPanels();
@@ -1658,7 +1760,6 @@ function draw(): void {
   const camera = resolveCameraCenter(world, snapshot);
   const centerX = camera.x;
   const centerY = camera.y;
-  const interpolationAlpha = getInterpolationAlpha();
 
   const baseTileSize = Math.floor(Math.min(canvas.width, canvas.height) / 26);
   const tileSize = isSpectator
@@ -1754,7 +1855,7 @@ function draw(): void {
 
   drawGates(world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY);
   drawFruits(snapshot.fruits, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY);
-  drawGhosts(snapshot.ghosts, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY, interpolationAlpha);
+  drawGhosts(snapshot.ghosts, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY);
   drawPlayers(
     snapshot.players,
     world,
@@ -1767,7 +1868,6 @@ function draw(): void {
     maxX,
     maxY,
     snapshot.nowMs,
-    interpolationAlpha,
   );
   drawPings(snapshot.pings, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY, snapshot.nowMs);
   drawSpectatorMinimap(world, snapshot, minX, minY, maxX, maxY);
@@ -2035,10 +2135,9 @@ function drawGhosts(
   minY: number,
   maxX: number,
   maxY: number,
-  interpolationAlpha: number,
 ): void {
   for (const ghost of ghosts) {
-    const renderPos = getInterpolatedPosition(ghost.id, ghost.x, ghost.y, ghostInterpolation, interpolationAlpha);
+    const renderPos = getInterpolatedPosition(ghost.id, ghost.x, ghost.y, ghostInterpolation);
     if (renderPos.x < minX || renderPos.x > maxX || renderPos.y < minY || renderPos.y > maxY) {
       continue;
     }
@@ -2071,10 +2170,9 @@ function drawPlayers(
   maxX: number,
   maxY: number,
   nowMs: number,
-  interpolationAlpha: number,
 ): void {
   for (const player of players) {
-    const renderPos = getInterpolatedPosition(player.id, player.x, player.y, playerInterpolation, interpolationAlpha);
+    const renderPos = getInterpolatedPosition(player.id, player.x, player.y, playerInterpolation);
     if (renderPos.x < minX || renderPos.x > maxX || renderPos.y < minY || renderPos.y > maxY) {
       continue;
     }
@@ -2162,19 +2260,26 @@ function drawPowerEffect(x: number, y: number, tileSize: number, nowMs: number, 
 
 function updateInterpolationStates(nextSnapshot: Snapshot): void {
   const nowMs = performance.now();
-  latestSnapshotReceivedAtMs = nowMs;
+  const tickRate = config?.tickRate ?? 20;
+  const frameMs = 1000 / Math.max(1, tickRate);
+  const durationFloorMs = Math.max(16, frameMs);
+  const durationCeilingMs = Math.max(180, frameMs * 8);
 
   updateEntityInterpolationMap(
     playerInterpolation,
     nextSnapshot.players.map((player) => ({ id: player.id, x: player.x, y: player.y })),
     nowMs,
     3,
+    durationFloorMs,
+    durationCeilingMs,
   );
   updateEntityInterpolationMap(
     ghostInterpolation,
     nextSnapshot.ghosts.map((ghost) => ({ id: ghost.id, x: ghost.x, y: ghost.y })),
     nowMs,
     4,
+    durationFloorMs,
+    durationCeilingMs,
   );
 }
 
@@ -2183,6 +2288,8 @@ function updateEntityInterpolationMap(
   entities: Array<{ id: string; x: number; y: number }>,
   nowMs: number,
   teleportThreshold: number,
+  durationFloorMs: number,
+  durationCeilingMs: number,
 ): void {
   const aliveIds = new Set<string>();
 
@@ -2197,17 +2304,26 @@ function updateEntityInterpolationMap(
         toX: entity.x,
         toY: entity.y,
         updatedAtMs: nowMs,
+        durationMs: durationFloorMs,
+        lastMoveAtMs: nowMs,
       });
       continue;
     }
 
-    let fromX = previous.toX;
-    let fromY = previous.toY;
-    const jumpDistance = Math.abs(fromX - entity.x) + Math.abs(fromY - entity.y);
+    const previousDurationMs = Math.max(1, previous.durationMs);
+    const previousAlpha = clampNumber((nowMs - previous.updatedAtMs) / previousDurationMs, 0, 1);
+    let fromX = previous.fromX + (previous.toX - previous.fromX) * previousAlpha;
+    let fromY = previous.fromY + (previous.toY - previous.fromY) * previousAlpha;
+    const jumpDistance = Math.abs(previous.toX - entity.x) + Math.abs(previous.toY - entity.y);
     if (jumpDistance > teleportThreshold) {
       fromX = entity.x;
       fromY = entity.y;
     }
+    const moved = previous.toX !== entity.x || previous.toY !== entity.y;
+    const moveIntervalMs = moved ? nowMs - previous.lastMoveAtMs : previous.durationMs;
+    const durationMs = moved
+      ? clampNumber(moveIntervalMs, durationFloorMs, durationCeilingMs)
+      : previous.durationMs;
 
     map.set(entity.id, {
       fromX,
@@ -2215,6 +2331,8 @@ function updateEntityInterpolationMap(
       toX: entity.x,
       toY: entity.y,
       updatedAtMs: nowMs,
+      durationMs,
+      lastMoveAtMs: moved ? nowMs : previous.lastMoveAtMs,
     });
   }
 
@@ -2225,24 +2343,17 @@ function updateEntityInterpolationMap(
   }
 }
 
-function getInterpolationAlpha(): number {
-  const tickRate = config?.tickRate ?? 20;
-  const frameMs = 1000 / Math.max(1, tickRate);
-  const elapsedMs = performance.now() - latestSnapshotReceivedAtMs;
-  return clampNumber(elapsedMs / frameMs, 0, 1);
-}
-
 function getInterpolatedPosition(
   entityId: string,
   currentX: number,
   currentY: number,
   map: Map<string, InterpolationState>,
-  alpha: number,
 ): { x: number; y: number } {
   const item = map.get(entityId);
   if (!item) {
     return { x: currentX, y: currentY };
   }
+  const alpha = clampNumber((performance.now() - item.updatedAtMs) / Math.max(1, item.durationMs), 0, 1);
 
   return {
     x: item.fromX + (item.toX - item.fromX) * alpha,

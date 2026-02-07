@@ -104,6 +104,10 @@ body {
   left: 12px;
   top: 12px;
   padding: 8px;
+  width: 252px;
+}
+
+#spectator-controls.spectator-mode {
   width: 320px;
 }
 
@@ -149,6 +153,14 @@ body {
   margin-bottom: 6px;
 }
 
+#spectator-controls #spectator-toolbar {
+  margin-bottom: 6px;
+}
+
+#spectator-controls .spectator-hint {
+  margin-bottom: 4px;
+}
+
 #spectator-controls button {
   margin: 0;
   width: auto;
@@ -178,10 +190,15 @@ body {
   display: block;
   width: 100%;
   height: auto;
-  margin-top: 6px;
   border: 1px solid rgba(122, 192, 255, 0.4);
   border-radius: 8px;
   background: rgba(7, 12, 23, 0.95);
+}
+
+#minimap-legend {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .panel {
@@ -322,6 +339,10 @@ button:disabled {
   #spectator-controls {
     top: 90px;
     left: 8px;
+    width: min(260px, 92vw);
+  }
+
+  #spectator-controls.spectator-mode {
     width: min(340px, 92vw);
   }
 
