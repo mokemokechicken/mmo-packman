@@ -69,6 +69,10 @@ npm run simulate -- --single --ai 5 --minutes 10 --difficulty normal
 npm run reference:ts:simulate -- --single --ai 5 --minutes 3 --difficulty normal
 ```
 
+## タイムラプスリプレイ
+
+- 生成/再生手順とフォーマット: [docs/replay_timelapse.md](./replay_timelapse.md)
+
 ## 注意
 
 - Rust WebSocket サーバーは未実装のため、UI からの実プレイは現時点では未対応。

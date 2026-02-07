@@ -249,6 +249,7 @@ function sendWelcomeAndInitialState(ctx: ClientContext, member: LobbyPlayerInter
     world: game.getWorldInit(),
     config: game.config,
     startedAtMs: game.startedAtMs,
+    seed: game.seed,
     isSpectator: member.spectator,
   });
 
@@ -343,6 +344,7 @@ function handleLobbyStart(
       world: game.getWorldInit(),
       config: game.config,
       startedAtMs: game.startedAtMs,
+      seed: game.seed,
       isSpectator: member.spectator,
     });
   }

@@ -254,6 +254,23 @@ button:disabled {
   font-size: 12px;
 }
 
+.replay-inline {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.replay-inline button {
+  flex: 1;
+  margin: 0;
+  min-width: 96px;
+}
+
+.replay-file input[type='file'] {
+  margin-top: 6px;
+}
+
 .overlay {
   position: absolute;
   left: 50%;

@@ -15,6 +15,7 @@ import type {
   Snapshot,
   WorldInit,
 } from '../shared/types.js';
+import { findReplayFrameIndex, parseReplayLog, type ReplayFrame, type ReplayLog } from './replay_parser.js';
 
 const canvas = mustElement<HTMLCanvasElement>('game');
 const hud = mustElement<HTMLElement>('hud');
@@ -40,6 +41,20 @@ interface InterpolationState {
 }
 
 type SpectatorCameraMode = 'follow' | 'free';
+
+interface ReplayPlaybackState {
+  log: ReplayLog;
+  frameOffsetsMs: number[];
+  durationMs: number;
+  frameIndex: number;
+  cursorMs: number;
+  speed: number;
+  playing: boolean;
+  lastPerfMs: number;
+}
+
+const REPLAY_SAMPLE_TICK_INTERVAL = 4;
+const REPLAY_SPEED_OPTIONS = [0.5, 1, 2, 4] as const;
 
 let ws: WebSocket | null = null;
 let reconnectTimer: number | null = null;
@@ -69,6 +84,18 @@ let summary: GameSummary | null = null;
 let lobbyMessage = '';
 let logs: string[] = [];
 const observedPingIds = new Set<string>();
+let currentMatchSeed = 0;
+let currentMatchStartedAtMs = 0;
+let replayRecordingFrames: ReplayFrame[] = [];
+let latestReplayLog: ReplayLog | null = null;
+let replayPlayback: ReplayPlaybackState | null = null;
+let replaySavedWorld: WorldInit | null = null;
+let replaySavedSnapshot: Snapshot | null = null;
+let replaySavedDots: string[] | null = null;
+let replaySavedPellets: Array<{ key: string; x: number; y: number; active: boolean }> | null = null;
+let replaySavedIsSpectator: boolean | null = null;
+let replaySavedCameraMode: SpectatorCameraMode | null = null;
+let replaySavedFollowPlayerId: string | null = null;
 let currentDir: 'up' | 'down' | 'left' | 'right' | 'none' = 'none';
 let followPlayerId: string | null = null;
 let spectatorCameraMode: SpectatorCameraMode = 'follow';
@@ -177,15 +204,21 @@ function handleServerMessage(message: ServerMessage): void {
   }
 
   if (message.type === 'game_init') {
+    if (replayPlayback) {
+      closeReplay();
+    }
     meId = message.meId;
     world = message.world;
     config = message.config;
+    currentMatchSeed = Number.isFinite(message.seed) ? message.seed : 0;
+    currentMatchStartedAtMs = message.startedAtMs;
     currentDir = 'none';
     isSpectator = message.isSpectator;
     summary = null;
     snapshot = null;
     logs = [];
     observedPingIds.clear();
+    replayRecordingFrames = [];
     followPlayerId = null;
     spectatorCameraMode = 'follow';
     spectatorZoom = 1;
@@ -211,6 +244,9 @@ function handleServerMessage(message: ServerMessage): void {
   }
 
   if (message.type === 'state') {
+    if (replayPlayback) {
+      return;
+    }
     const previousSnapshot = snapshot;
     snapshot = normalizeSnapshot(message.snapshot);
     syncPingLogs(snapshot.pings);
@@ -219,6 +255,7 @@ function handleServerMessage(message: ServerMessage): void {
     for (const event of snapshot.events) {
       applyEvent(event);
     }
+    recordReplayFrame(snapshot);
     updateHud();
     updateStatusPanels();
     return;
@@ -226,6 +263,7 @@ function handleServerMessage(message: ServerMessage): void {
 
   if (message.type === 'game_over') {
     summary = normalizeSummary(message.summary);
+    finalizeReplayLog(summary);
     playSoundForGameOver(summary.reason);
     showResult();
     updateStatusPanels();
@@ -293,6 +331,47 @@ function syncPingLogs(pings: PingView[]): void {
   for (const id of nextObserved) {
     observedPingIds.add(id);
   }
+}
+
+function recordReplayFrame(state: Snapshot): void {
+  if (replayPlayback) {
+    return;
+  }
+
+  const shouldSample = replayRecordingFrames.length === 0 || state.tick % REPLAY_SAMPLE_TICK_INTERVAL === 0 || state.timeLeftMs <= 0;
+  if (!shouldSample) {
+    return;
+  }
+
+  const last = replayRecordingFrames[replayRecordingFrames.length - 1];
+  if (last && last.snapshot.tick === state.tick) {
+    return;
+  }
+
+  replayRecordingFrames.push(captureReplayFrame(state));
+}
+
+function finalizeReplayLog(finalSummary: GameSummary): void {
+  if (!world || !config || replayRecordingFrames.length === 0) {
+    latestReplayLog = null;
+    return;
+  }
+
+  const lastFrame = replayRecordingFrames[replayRecordingFrames.length - 1];
+  if (snapshot && lastFrame?.snapshot.tick !== snapshot.tick) {
+    replayRecordingFrames.push(captureReplayFrame(snapshot));
+  }
+
+  latestReplayLog = {
+    format: 'mmo-packman-replay-v1',
+    recordedAtIso: new Date().toISOString(),
+    seed: currentMatchSeed,
+    config: { ...config },
+    world: cloneWorld(world),
+    startedAtMs: currentMatchStartedAtMs,
+    summary: normalizeSummary(finalSummary),
+    frames: replayRecordingFrames.map((frame) => cloneReplayFrame(frame)),
+  };
 }
 
 function renderLobby(players: LobbyPlayer[], running: boolean, canStart: boolean, spectatorCount: number): void {
@@ -420,6 +499,15 @@ function showResult(): void {
       return `<li>${index + 1}. ${escapeHtml(entry.name)} - ${entry.score}pt (dot:${entry.dots}, ghost:${entry.ghosts}, rescue:${entry.rescues})</li>`;
     })
     .join('');
+  const replaySection = latestReplayLog
+    ? `
+      <p class="muted">seed: ${latestReplayLog.seed} / frame: ${latestReplayLog.frames.length}</p>
+      <div class="replay-inline">
+        <button id="replay-open-latest" type="button">リプレイ再生</button>
+        <button id="replay-export" type="button">JSON保存</button>
+      </div>
+    `
+    : '<p class="muted">この試合のリプレイはまだ生成されていません。</p>';
 
   result.innerHTML = `
     <div class="panel">
@@ -431,13 +519,42 @@ function showResult(): void {
       <ol>${ranking}</ol>
       <h3>タイムライン</h3>
       <ul>${summary.timeline.slice(-12).map((t) => `<li>${formatMs(t.atMs)} ${escapeHtml(t.label)}</li>`).join('')}</ul>
+      <h3>リプレイ</h3>
+      ${replaySection}
+      <label class="replay-file">リプレイJSON読込
+        <input id="replay-import" type="file" accept=\".json,application/json\" />
+      </label>
       <button id="close-result">閉じる</button>
     </div>
   `;
 
   const close = document.getElementById('close-result');
+  const openReplayButton = document.getElementById('replay-open-latest');
+  const exportReplayButton = document.getElementById('replay-export');
+  const importReplayInput = document.getElementById('replay-import') as HTMLInputElement | null;
+
   close?.addEventListener('click', () => {
     result.classList.add('hidden');
+  });
+  openReplayButton?.addEventListener('click', () => {
+    if (!latestReplayLog) {
+      return;
+    }
+    openReplay(latestReplayLog);
+  });
+  exportReplayButton?.addEventListener('click', () => {
+    if (!latestReplayLog) {
+      return;
+    }
+    exportReplay(latestReplayLog);
+  });
+  importReplayInput?.addEventListener('change', () => {
+    const file = importReplayInput.files?.[0];
+    if (!file) {
+      return;
+    }
+    void importReplayFromFile(file);
+    importReplayInput.value = '';
   });
 }
 
@@ -453,6 +570,89 @@ function normalizeSnapshot(raw: Snapshot): Snapshot {
     ...raw,
     pings: raw.pings ?? [],
   };
+}
+
+function cloneWorld(raw: WorldInit): WorldInit {
+  return {
+    ...raw,
+    tiles: [...raw.tiles],
+    sectors: raw.sectors.map((sector) => ({ ...sector })),
+    gates: raw.gates.map((gate) => ({
+      ...gate,
+      a: { ...gate.a },
+      b: { ...gate.b },
+      switchA: { ...gate.switchA },
+      switchB: { ...gate.switchB },
+    })),
+    dots: raw.dots.map(([x, y]) => [x, y]),
+    powerPellets: raw.powerPellets.map((pellet) => ({ ...pellet })),
+  };
+}
+
+function cloneSnapshot(raw: Snapshot): Snapshot {
+  return {
+    ...raw,
+    players: raw.players.map((player) => ({ ...player })),
+    ghosts: raw.ghosts.map((ghost) => ({ ...ghost })),
+    fruits: raw.fruits.map((fruit) => ({ ...fruit })),
+    sectors: raw.sectors.map((sector) => ({ ...sector })),
+    gates: raw.gates.map((gate) => ({
+      ...gate,
+      a: { ...gate.a },
+      b: { ...gate.b },
+      switchA: { ...gate.switchA },
+      switchB: { ...gate.switchB },
+    })),
+    pings: raw.pings.map((ping) => ({ ...ping })),
+    events: raw.events.map((event) => ({ ...event })),
+    timeline: raw.timeline.map((item) => ({ ...item })),
+  };
+}
+
+function captureReplayFrame(state: Snapshot): ReplayFrame {
+  return {
+    snapshot: cloneSnapshot(state),
+    dots: Array.from(dotSet.values()),
+    pellets: Array.from(pelletMap.values()).map((pellet) => ({
+      key: dotKey(pellet.x, pellet.y),
+      x: pellet.x,
+      y: pellet.y,
+      active: pellet.active,
+    })),
+  };
+}
+
+function cloneReplayFrame(raw: ReplayFrame): ReplayFrame {
+  return {
+    snapshot: cloneSnapshot(raw.snapshot),
+    dots: [...raw.dots],
+    pellets: raw.pellets.map((pellet) => ({ ...pellet })),
+  };
+}
+
+function restoreReplayBoardState(frame: ReplayFrame): void {
+  dotSet.clear();
+  for (const key of frame.dots) {
+    dotSet.add(key);
+  }
+
+  pelletMap.clear();
+  const pellets =
+    frame.pellets.length > 0
+      ? frame.pellets
+      : (world?.powerPellets.map((pellet) => ({
+          key: pellet.key,
+          x: pellet.x,
+          y: pellet.y,
+          active: pellet.active,
+        })) ?? []);
+  for (const pellet of pellets) {
+    pelletMap.set(pellet.key, {
+      x: pellet.x,
+      y: pellet.y,
+      active: pellet.active,
+    });
+  }
 }
 
 function renderAwards(awards: AwardEntry[]): string {
@@ -1118,6 +1318,21 @@ function updateHud(): void {
     : me
       ? `<p>mode: ${modeText}</p><p>自分: ${escapeHtml(me.name)} | score ${me.score} | 状態: ${me.state}</p>`
       : '<p>自分の情報なし</p>';
+  const replayControls = replayPlayback
+    ? `
+      <h4>Replay</h4>
+      <p>seed: ${replayPlayback.log.seed} / speed: x${replayPlayback.speed.toFixed(1)} / frame: ${replayPlayback.frameIndex + 1}/${replayPlayback.log.frames.length}</p>
+      <div class="replay-inline">
+        <button id="replay-toggle" type="button">${replayPlayback.playing ? '一時停止' : '再生'}</button>
+        <button id="replay-slower" type="button">-速度</button>
+        <button id="replay-faster" type="button">+速度</button>
+        <button id="replay-exit" type="button">終了</button>
+      </div>
+      <input id="replay-seek" type="range" min="0" max="1000" value="${Math.round(
+        replayPlayback.durationMs > 0 ? (replayPlayback.cursorMs / replayPlayback.durationMs) * 1000 : 0,
+      )}" />
+    `
+    : '';
 
   hud.innerHTML = `
     <div class="panel small">
@@ -1130,8 +1345,10 @@ function updateHud(): void {
       ${meLine}
       <h4>イベント</h4>
       <ul>${logs.slice(-8).map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>
+      ${replayControls}
     </div>
   `;
+  wireReplayHudControls();
 }
 
 function currentFollowName(players: PlayerView[]): string {
@@ -1144,7 +1361,215 @@ function currentFollowName(players: PlayerView[]): string {
 
 function renderFrame(): void {
   requestAnimationFrame(renderFrame);
+  advanceReplayPlayback();
   draw();
+}
+
+function wireReplayHudControls(): void {
+  if (!replayPlayback) {
+    return;
+  }
+
+  const toggle = document.getElementById('replay-toggle');
+  const slower = document.getElementById('replay-slower');
+  const faster = document.getElementById('replay-faster');
+  const exit = document.getElementById('replay-exit');
+  const seek = document.getElementById('replay-seek') as HTMLInputElement | null;
+
+  toggle?.addEventListener('click', () => {
+    if (!replayPlayback) {
+      return;
+    }
+    replayPlayback.playing = !replayPlayback.playing;
+    replayPlayback.lastPerfMs = performance.now();
+    updateHud();
+  });
+  slower?.addEventListener('click', () => changeReplaySpeed(-1));
+  faster?.addEventListener('click', () => changeReplaySpeed(1));
+  exit?.addEventListener('click', () => closeReplay());
+  seek?.addEventListener('input', () => {
+    if (!replayPlayback) {
+      return;
+    }
+    const ratio = clampNumber(Number(seek.value) / 1000, 0, 1);
+    replayPlayback.cursorMs = replayPlayback.durationMs * ratio;
+    const index = findReplayFrameIndex(replayPlayback.frameOffsetsMs, replayPlayback.cursorMs);
+    setReplayFrameIndex(index);
+    replayPlayback.playing = false;
+    replayPlayback.lastPerfMs = performance.now();
+    updateHud();
+  });
+}
+
+function advanceReplayPlayback(): void {
+  if (!replayPlayback) {
+    return;
+  }
+  if (!replayPlayback.playing) {
+    replayPlayback.lastPerfMs = performance.now();
+    return;
+  }
+  if (replayPlayback.durationMs <= 0) {
+    replayPlayback.playing = false;
+    return;
+  }
+
+  const now = performance.now();
+  const deltaMs = Math.max(0, now - replayPlayback.lastPerfMs);
+  replayPlayback.lastPerfMs = now;
+  replayPlayback.cursorMs = clampNumber(replayPlayback.cursorMs + deltaMs * replayPlayback.speed, 0, replayPlayback.durationMs);
+
+  const nextIndex = findReplayFrameIndex(replayPlayback.frameOffsetsMs, replayPlayback.cursorMs);
+  setReplayFrameIndex(nextIndex);
+
+  if (replayPlayback.cursorMs >= replayPlayback.durationMs) {
+    replayPlayback.playing = false;
+    updateHud();
+  }
+}
+
+function setReplayFrameIndex(index: number): void {
+  if (!replayPlayback) {
+    return;
+  }
+  const safeIndex = clampNumber(index, 0, replayPlayback.log.frames.length - 1);
+  const frame = replayPlayback.log.frames[safeIndex];
+  if (!frame) {
+    return;
+  }
+  if (safeIndex === replayPlayback.frameIndex && snapshot?.tick === frame.snapshot.tick) {
+    return;
+  }
+  replayPlayback.frameIndex = safeIndex;
+  snapshot = cloneSnapshot(frame.snapshot);
+  restoreReplayBoardState(frame);
+  latestSnapshotReceivedAtMs = performance.now();
+  playerInterpolation.clear();
+  ghostInterpolation.clear();
+  updateStatusPanels();
+  updateHud();
+}
+
+function changeReplaySpeed(direction: 1 | -1): void {
+  if (!replayPlayback) {
+    return;
+  }
+  const currentIndex = REPLAY_SPEED_OPTIONS.findIndex((speed) => speed === replayPlayback?.speed);
+  const start = currentIndex >= 0 ? currentIndex : 1;
+  const next = clampNumber(start + direction, 0, REPLAY_SPEED_OPTIONS.length - 1);
+  replayPlayback.speed = REPLAY_SPEED_OPTIONS[next] as number;
+  updateHud();
+}
+
+function openReplay(log: ReplayLog): void {
+  if (log.frames.length === 0) {
+    pushLog('リプレイに再生可能フレームがありません');
+    return;
+  }
+
+  if (replayPlayback) {
+    closeReplay();
+  }
+
+  replaySavedWorld = world ? cloneWorld(world) : null;
+  replaySavedSnapshot = snapshot ? cloneSnapshot(snapshot) : null;
+  replaySavedDots = Array.from(dotSet.values());
+  replaySavedPellets = Array.from(pelletMap.values()).map((pellet) => ({
+    key: dotKey(pellet.x, pellet.y),
+    x: pellet.x,
+    y: pellet.y,
+    active: pellet.active,
+  }));
+  replaySavedIsSpectator = isSpectator;
+  replaySavedCameraMode = spectatorCameraMode;
+  replaySavedFollowPlayerId = followPlayerId;
+
+  const firstNow = log.frames[0]?.snapshot.nowMs ?? 0;
+  const offsets = log.frames.map((frame) => Math.max(0, frame.snapshot.nowMs - firstNow));
+  const durationMs = offsets[offsets.length - 1] ?? 0;
+
+  replayPlayback = {
+    log,
+    frameOffsetsMs: offsets,
+    durationMs,
+    frameIndex: -1,
+    cursorMs: 0,
+    speed: 1,
+    playing: true,
+    lastPerfMs: performance.now(),
+  };
+  isSpectator = true;
+  spectatorCameraMode = 'follow';
+  followPlayerId = null;
+  updateTouchControlsVisibility();
+  world = cloneWorld(log.world);
+  result.classList.add('hidden');
+  setReplayFrameIndex(0);
+  pushLog(`Replay loaded: seed=${log.seed}, frame=${log.frames.length}`);
+}
+
+function closeReplay(): void {
+  if (!replayPlayback) {
+    return;
+  }
+
+  replayPlayback = null;
+  world = replaySavedWorld ? cloneWorld(replaySavedWorld) : world;
+  snapshot = replaySavedSnapshot ? cloneSnapshot(replaySavedSnapshot) : snapshot;
+  dotSet.clear();
+  for (const key of replaySavedDots ?? []) {
+    dotSet.add(key);
+  }
+  pelletMap.clear();
+  for (const pellet of replaySavedPellets ?? []) {
+    pelletMap.set(pellet.key, {
+      x: pellet.x,
+      y: pellet.y,
+      active: pellet.active,
+    });
+  }
+  replaySavedWorld = null;
+  replaySavedSnapshot = null;
+  replaySavedDots = null;
+  replaySavedPellets = null;
+  isSpectator = replaySavedIsSpectator ?? isSpectator;
+  spectatorCameraMode = replaySavedCameraMode ?? spectatorCameraMode;
+  followPlayerId = replaySavedFollowPlayerId ?? followPlayerId;
+  replaySavedIsSpectator = null;
+  replaySavedCameraMode = null;
+  replaySavedFollowPlayerId = null;
+  updateTouchControlsVisibility();
+  latestSnapshotReceivedAtMs = performance.now();
+  playerInterpolation.clear();
+  ghostInterpolation.clear();
+  updateStatusPanels();
+  updateHud();
+}
+
+function exportReplay(log: ReplayLog): void {
+  const payload = JSON.stringify(log);
+  const blob = new Blob([payload], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `mmo-packman-replay-${log.seed}-${Date.now()}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function importReplayFromFile(file: File): Promise<void> {
+  try {
+    const raw = await file.text();
+    const parsed = parseReplayLog(JSON.parse(raw) as unknown);
+    if (!parsed) {
+      pushLog('リプレイ形式を解釈できませんでした');
+      return;
+    }
+    latestReplayLog = parsed;
+    openReplay(parsed);
+  } catch {
+    pushLog('リプレイ読込に失敗しました');
+  }
 }
 
 function draw(): void {
