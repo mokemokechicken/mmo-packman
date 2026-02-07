@@ -32,6 +32,7 @@ jobs:
           const scripts = pkg.scripts || {};
           console.log(`has_test=${Boolean(scripts.test)}`);
           console.log(`has_simulate_rust=${Boolean(scripts['simulate:rust'])}`);
+          console.log(`has_test_parity=${Boolean(scripts['test:parity'])}`);
           NODE
 
       - name: Type check
@@ -68,6 +69,16 @@ jobs:
             exit 1
           fi
 
+      - name: Validate parity script
+        run: |
+          if [ "${{ steps.detect_scripts.outputs.has_test_parity }}" != "true" ]; then
+            echo "test:parity script is required."
+            exit 1
+          fi
+
       - name: Rust simulate smoke
         if: ${{ hashFiles('rust/server/Cargo.toml') != '' }}
         run: npm run simulate:rust -- --single --ai 2 --minutes 1 --difficulty normal --seed 12345
+
+      - name: Parity check (blocking)
+        run: npm run test:parity -- --ai 5 --minutes 1 --difficulty normal --seed-start 1001 --seed-count 4

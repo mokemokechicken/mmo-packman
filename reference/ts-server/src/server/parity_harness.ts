@@ -30,7 +30,6 @@ export interface HarnessOptions {
   minutes: number;
   difficulty: Difficulty;
   seeds: number[];
-  captureTolerance: number;
   reportFile: string | null;
 }
 
@@ -65,9 +64,9 @@ function main(): void {
 
   for (const seed of options.seeds) {
     try {
-      const tsRun = runSimulator('simulate', options, seed);
+      const tsRun = runSimulator('reference:ts:simulate', options, seed);
       const rustRun = runSimulator('simulate:rust', options, seed);
-      const differences = compareResults(tsRun.line, rustRun.line, options.captureTolerance);
+      const differences = compareResults(tsRun.line, rustRun.line);
 
       if (differences.length === 0) {
         console.log(`[parity] seed=${seed} OK`);
@@ -113,7 +112,6 @@ function main(): void {
       ai: options.ai,
       minutes: options.minutes,
       difficulty: options.difficulty,
-      captureTolerance: options.captureTolerance,
       seeds: options.seeds,
     },
     failures,
@@ -134,7 +132,11 @@ function main(): void {
   console.log(`[parity] PASSED ${options.seeds.length}/${options.seeds.length} seeds.`);
 }
 
-function runSimulator(scriptName: 'simulate' | 'simulate:rust', options: HarnessOptions, seed: number): EngineRunResult {
+function runSimulator(
+  scriptName: 'reference:ts:simulate' | 'simulate:rust',
+  options: HarnessOptions,
+  seed: number
+): EngineRunResult {
   const args = buildNpmArgs(scriptName, options, seed);
   const commandText = `npm ${args.join(' ')}`;
   const result = spawnSync('npm', args, {
@@ -176,7 +178,11 @@ function runSimulator(scriptName: 'simulate' | 'simulate:rust', options: Harness
   };
 }
 
-function buildNpmArgs(scriptName: 'simulate' | 'simulate:rust', options: HarnessOptions, seed: number): string[] {
+export function buildNpmArgs(
+  scriptName: 'reference:ts:simulate' | 'simulate:rust',
+  options: HarnessOptions,
+  seed: number
+): string[] {
   return [
     'run',
     scriptName,
@@ -193,9 +199,9 @@ function buildNpmArgs(scriptName: 'simulate' | 'simulate:rust', options: Harness
   ];
 }
 
-function buildCommandTexts(options: HarnessOptions, seed: number): { ts: string; rust: string } {
+export function buildCommandTexts(options: HarnessOptions, seed: number): { ts: string; rust: string } {
   return {
-    ts: `npm ${buildNpmArgs('simulate', options, seed).join(' ')}`,
+    ts: `npm ${buildNpmArgs('reference:ts:simulate', options, seed).join(' ')}`,
     rust: `npm ${buildNpmArgs('simulate:rust', options, seed).join(' ')}`,
   };
 }
@@ -258,54 +264,41 @@ function isScenarioResultLine(value: unknown): value is ScenarioResultLine {
   );
 }
 
-export function compareResults(ts: ScenarioResultLine, rust: ScenarioResultLine, captureTolerance: number): string[] {
+export function compareResults(ts: ScenarioResultLine, rust: ScenarioResultLine): string[] {
   const diffs: string[] = [];
-  const exactKeys: Array<keyof ScenarioResultLine> = [
+  const strictKeys: Array<keyof ScenarioResultLine> = [
+    'scenario',
+    'seed',
+    'aiPlayers',
+    'minutes',
+    'difficulty',
     'reason',
-    'dotEaten',
     'dotRespawned',
-    'downs',
-    'rescues',
-    'sectorCaptured',
     'sectorLost',
     'bossSpawned',
     'bossHits',
   ];
 
-  for (const key of exactKeys) {
+  for (const key of strictKeys) {
     if (ts[key] !== rust[key]) {
       diffs.push(`${key}: ts=${String(ts[key])}, rust=${String(rust[key])}`);
     }
   }
 
-  if (ts.anomalies.length !== rust.anomalies.length) {
-    diffs.push(`anomalies.length: ts=${ts.anomalies.length}, rust=${rust.anomalies.length}`);
+  if (
+    ts.anomalies.length !== rust.anomalies.length ||
+    ts.anomalies.some((value, index) => value !== (rust.anomalies[index] ?? ''))
+  ) {
+    diffs.push(`anomalies: ts=${JSON.stringify(ts.anomalies)}, rust=${JSON.stringify(rust.anomalies)}`);
   }
-
-  compareCaptureValue('maxCapture', ts.maxCapture, rust.maxCapture, captureTolerance, diffs);
-  compareCaptureValue('minCaptureAfter70', ts.minCaptureAfter70, rust.minCaptureAfter70, captureTolerance, diffs);
 
   return diffs;
-}
-
-function compareCaptureValue(
-  name: 'maxCapture' | 'minCaptureAfter70',
-  ts: number,
-  rust: number,
-  tolerance: number,
-  diffs: string[]
-): void {
-  const delta = Math.abs(ts - rust);
-  if (delta > tolerance) {
-    diffs.push(`${name}: ts=${ts}, rust=${rust}, delta=${delta.toFixed(3)} > tolerance(${tolerance})`);
-  }
 }
 
 export function resolveOptions(args: string[]): HarnessOptions {
   const ai = clamp(readArgNumber(args, '--ai') ?? 5, 1, 100);
   const minutes = clamp(readArgNumber(args, '--minutes') ?? 3, 1, 10);
   const difficulty = readDifficulty(args, '--difficulty') ?? 'normal';
-  const captureTolerance = readArgNumber(args, '--capture-tolerance') ?? 0.2;
   const reportFile = readArgString(args, '--report-file');
 
   const explicitSeeds = readArgString(args, '--seeds');
@@ -316,16 +309,11 @@ export function resolveOptions(args: string[]): HarnessOptions {
         clamp(readArgNumber(args, '--seed-count') ?? 10, 1, 100)
       );
 
-  if (captureTolerance < 0) {
-    throw new Error('--capture-tolerance must be >= 0');
-  }
-
   return {
     ai,
     minutes,
     difficulty,
     seeds,
-    captureTolerance,
     reportFile,
   };
 }

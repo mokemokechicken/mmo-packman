@@ -104,13 +104,43 @@ body {
   left: 12px;
   top: 12px;
   padding: 8px;
-  width: 280px;
+  width: 320px;
+}
+
+#audio-settings {
+  right: 342px;
+  bottom: 12px;
+  width: min(320px, calc(100vw - 354px));
+  padding: 10px;
+}
+
+#audio-settings .sound-title {
+  font-size: 12px;
+  color: #bdd4ff;
+  margin-bottom: 6px;
+}
+
+#audio-settings .sound-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+#audio-settings .sound-row input[type='checkbox'] {
+  width: auto;
+  margin: 0;
+}
+
+#audio-settings input[type='range'] {
+  margin-top: 6px;
 }
 
 #spectator-controls .spec-row {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-bottom: 6px;
 }
 
 #spectator-controls .spec-title {
@@ -122,8 +152,18 @@ body {
 #spectator-controls button {
   margin: 0;
   width: auto;
-  min-width: 44px;
+  min-width: 38px;
   padding: 6px 8px;
+}
+
+#spectator-controls #spectator-mode {
+  flex: 1;
+}
+
+#spectator-controls #spectator-zoom {
+  min-width: 52px;
+  text-align: center;
+  font-size: 12px;
 }
 
 #spectator-target {
@@ -132,6 +172,16 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+#spectator-minimap {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-top: 6px;
+  border: 1px solid rgba(122, 192, 255, 0.4);
+  border-radius: 8px;
+  background: rgba(7, 12, 23, 0.95);
 }
 
 .panel {
@@ -204,6 +254,23 @@ button:disabled {
   font-size: 12px;
 }
 
+.replay-inline {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.replay-inline button {
+  flex: 1;
+  margin: 0;
+  min-width: 96px;
+}
+
+.replay-file input[type='file'] {
+  margin-top: 6px;
+}
+
 .overlay {
   position: absolute;
   left: 50%;
@@ -255,7 +322,13 @@ button:disabled {
   #spectator-controls {
     top: 90px;
     left: 8px;
-    width: min(300px, 92vw);
+    width: min(340px, 92vw);
+  }
+
+  #audio-settings {
+    right: 8px;
+    bottom: 8px;
+    width: min(320px, 92vw);
   }
 
   #hud {

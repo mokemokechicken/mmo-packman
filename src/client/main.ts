@@ -1,4 +1,5 @@
 import type {
+  AwardEntry,
   ClientMessage,
   Difficulty,
   FruitView,
@@ -6,12 +7,17 @@ import type {
   GameSummary,
   GhostView,
   LobbyPlayer,
+  PersistentRankingEntry,
+  PingType,
+  PingView,
   PlayerView,
+  RankingResponse,
   RuntimeEvent,
   ServerMessage,
   Snapshot,
   WorldInit,
 } from '../shared/types.js';
+import { findReplayFrameIndex, parseReplayLog, type ReplayFrame, type ReplayLog } from './replay_parser.js';
 
 const canvas = mustElement<HTMLCanvasElement>('game');
 const hud = mustElement<HTMLElement>('hud');
@@ -20,10 +26,13 @@ const result = mustElement<HTMLElement>('result');
 const touchControls = mustElement<HTMLElement>('touch-controls');
 const topStatus = mustElement<HTMLElement>('top-status');
 const spectatorControls = mustElement<HTMLElement>('spectator-controls');
+const audioSettingsPanel = mustElement<HTMLElement>('audio-settings');
 const ctx = mustCanvasContext(canvas);
 
 const dotSet = new Set<string>();
 const pelletMap = new Map<string, { x: number; y: number; active: boolean }>();
+const SOUND_VOLUME_KEY = 'mmo-packman-sound-volume';
+const SOUND_MUTED_KEY = 'mmo-packman-sound-muted';
 
 interface InterpolationState {
   fromX: number;
@@ -33,13 +42,39 @@ interface InterpolationState {
   updatedAtMs: number;
 }
 
+type SpectatorCameraMode = 'follow' | 'free';
+
+interface ReplayPlaybackState {
+  log: ReplayLog;
+  frameOffsetsMs: number[];
+  durationMs: number;
+  frameIndex: number;
+  cursorMs: number;
+  speed: number;
+  playing: boolean;
+  lastPerfMs: number;
+}
+
+const REPLAY_SAMPLE_TICK_INTERVAL = 4;
+const REPLAY_SPEED_OPTIONS = [0.5, 1, 2, 4] as const;
+
 let ws: WebSocket | null = null;
 let reconnectTimer: number | null = null;
 let reconnectToken = localStorage.getItem('mmo-packman-token') ?? '';
 let playerName = localStorage.getItem('mmo-packman-name') ?? `Player-${Math.floor(Math.random() * 1000)}`;
+let roomId = localStorage.getItem('mmo-packman-room') ?? 'main';
 let preferSpectator = localStorage.getItem('mmo-packman-spectator') === '1';
 let requestedAiCount = normalizeNumber(localStorage.getItem('mmo-packman-ai-count'), 2, 0, 100);
 let requestedTestMinutes = normalizeNumber(localStorage.getItem('mmo-packman-test-minutes'), 5, 1, 10);
+let soundVolume = normalizeNumber(localStorage.getItem(SOUND_VOLUME_KEY), 70, 0, 100) / 100;
+let soundMuted = localStorage.getItem(SOUND_MUTED_KEY) === '1';
+let audioUnlocked = false;
+let audioContext: AudioContext | null = null;
+let audioMasterGain: GainNode | null = null;
+let soundStatusElement: HTMLElement | null = null;
+let soundVolumeLabelElement: HTMLElement | null = null;
+let soundVolumeInputElement: HTMLInputElement | null = null;
+let soundMuteInputElement: HTMLInputElement | null = null;
 
 let sessionId = '';
 let meId = '';
@@ -51,8 +86,29 @@ let snapshot: Snapshot | null = null;
 let summary: GameSummary | null = null;
 let lobbyMessage = '';
 let logs: string[] = [];
+let rankingEntries: PersistentRankingEntry[] = [];
+let rankingFetchError = '';
+let rankingLastFetchedAtMs = 0;
+const observedPingIds = new Set<string>();
+let currentMatchSeed = 0;
+let currentMatchStartedAtMs = 0;
+let replayRecordingFrames: ReplayFrame[] = [];
+let latestReplayLog: ReplayLog | null = null;
+let replayPlayback: ReplayPlaybackState | null = null;
+let replaySavedWorld: WorldInit | null = null;
+let replaySavedSnapshot: Snapshot | null = null;
+let replaySavedDots: string[] | null = null;
+let replaySavedPellets: Array<{ key: string; x: number; y: number; active: boolean }> | null = null;
+let replaySavedIsSpectator: boolean | null = null;
+let replaySavedCameraMode: SpectatorCameraMode | null = null;
+let replaySavedFollowPlayerId: string | null = null;
 let currentDir: 'up' | 'down' | 'left' | 'right' | 'none' = 'none';
 let followPlayerId: string | null = null;
+let spectatorCameraMode: SpectatorCameraMode = 'follow';
+let spectatorZoom = 1;
+let freeCameraCenter: { x: number; y: number } | null = null;
+let spectatorMinimapCanvas: HTMLCanvasElement | null = null;
+let spectatorMinimapCtx: CanvasRenderingContext2D | null = null;
 let latestSnapshotReceivedAtMs = performance.now();
 const playerInterpolation = new Map<string, InterpolationState>();
 const ghostInterpolation = new Map<string, InterpolationState>();
@@ -62,9 +118,12 @@ start();
 function start(): void {
   resize();
   connect();
+  void fetchRankingBoard(true);
   wireKeyboard();
   wireTouchControls();
   initSpectatorControls();
+  initAudioSettingsPanel();
+  wireAudioUnlock();
   window.addEventListener('resize', resize);
   requestAnimationFrame(renderFrame);
 }
@@ -108,6 +167,7 @@ function sendHello(): void {
     name: playerName,
     reconnectToken: reconnectToken || undefined,
     spectator: preferSpectator,
+    roomId,
   };
   send(hello);
 }
@@ -146,20 +206,32 @@ function handleServerMessage(message: ServerMessage): void {
   if (message.type === 'lobby') {
     isHost = message.hostId === sessionId;
     lobbyMessage = message.note ?? '';
+    void fetchRankingBoard();
     renderLobby(message.players, message.running, message.canStart, message.spectatorCount);
     updateStatusPanels();
     return;
   }
 
   if (message.type === 'game_init') {
+    if (replayPlayback) {
+      closeReplay();
+    }
     meId = message.meId;
     world = message.world;
     config = message.config;
+    currentMatchSeed = Number.isFinite(message.seed) ? message.seed : 0;
+    currentMatchStartedAtMs = message.startedAtMs;
     currentDir = 'none';
     isSpectator = message.isSpectator;
     summary = null;
+    snapshot = null;
     logs = [];
+    observedPingIds.clear();
+    replayRecordingFrames = [];
     followPlayerId = null;
+    spectatorCameraMode = 'follow';
+    spectatorZoom = 1;
+    freeCameraCenter = null;
     playerInterpolation.clear();
     ghostInterpolation.clear();
     latestSnapshotReceivedAtMs = performance.now();
@@ -181,18 +253,28 @@ function handleServerMessage(message: ServerMessage): void {
   }
 
   if (message.type === 'state') {
-    snapshot = message.snapshot;
-    updateInterpolationStates(message.snapshot);
-    for (const event of message.snapshot.events) {
+    if (replayPlayback) {
+      return;
+    }
+    const previousSnapshot = snapshot;
+    snapshot = normalizeSnapshot(message.snapshot);
+    syncPingLogs(snapshot.pings);
+    playAwakenTransitions(previousSnapshot, snapshot);
+    updateInterpolationStates(snapshot);
+    for (const event of snapshot.events) {
       applyEvent(event);
     }
+    recordReplayFrame(snapshot);
     updateHud();
     updateStatusPanels();
     return;
   }
 
   if (message.type === 'game_over') {
-    summary = message.summary;
+    summary = normalizeSummary(message.summary);
+    finalizeReplayLog(summary);
+    void fetchRankingBoard(true);
+    playSoundForGameOver(summary.reason);
     showResult();
     updateStatusPanels();
     return;
@@ -204,6 +286,8 @@ function handleServerMessage(message: ServerMessage): void {
 }
 
 function applyEvent(event: RuntimeEvent): void {
+  playSoundForEvent(event);
+
   if (event.type === 'dot_eaten') {
     dotSet.delete(dotKey(event.x, event.y));
   } else if (event.type === 'dot_respawned') {
@@ -243,6 +327,115 @@ function applyEvent(event: RuntimeEvent): void {
   }
 }
 
+function syncPingLogs(pings: PingView[]): void {
+  const nextObserved = new Set<string>();
+  for (const ping of pings) {
+    nextObserved.add(ping.id);
+    if (observedPingIds.has(ping.id)) {
+      continue;
+    }
+    const label = pingKindLabel(ping.kind);
+    pushLog(`PING ${label}: ${ping.ownerName}`);
+  }
+  observedPingIds.clear();
+  for (const id of nextObserved) {
+    observedPingIds.add(id);
+  }
+}
+
+function recordReplayFrame(state: Snapshot): void {
+  if (replayPlayback) {
+    return;
+  }
+
+  const shouldSample = replayRecordingFrames.length === 0 || state.tick % REPLAY_SAMPLE_TICK_INTERVAL === 0 || state.timeLeftMs <= 0;
+  if (!shouldSample) {
+    return;
+  }
+
+  const last = replayRecordingFrames[replayRecordingFrames.length - 1];
+  if (last && last.snapshot.tick === state.tick) {
+    return;
+  }
+
+  replayRecordingFrames.push(captureReplayFrame(state));
+}
+
+function finalizeReplayLog(finalSummary: GameSummary): void {
+  if (!world || !config || replayRecordingFrames.length === 0) {
+    latestReplayLog = null;
+    return;
+  }
+
+  const lastFrame = replayRecordingFrames[replayRecordingFrames.length - 1];
+  if (snapshot && lastFrame?.snapshot.tick !== snapshot.tick) {
+    replayRecordingFrames.push(captureReplayFrame(snapshot));
+  }
+
+  latestReplayLog = {
+    format: 'mmo-packman-replay-v1',
+    recordedAtIso: new Date().toISOString(),
+    seed: currentMatchSeed,
+    config: { ...config },
+    world: cloneWorld(world),
+    startedAtMs: currentMatchStartedAtMs,
+    summary: normalizeSummary(finalSummary),
+    frames: replayRecordingFrames.map((frame) => cloneReplayFrame(frame)),
+  };
+}
+
+async function fetchRankingBoard(force = false): Promise<void> {
+  const nowMs = Date.now();
+  if (!force && nowMs - rankingLastFetchedAtMs < 15_000) {
+    return;
+  }
+
+  try {
+    const response = await fetch('/api/ranking?limit=8');
+    if (!response.ok) {
+      rankingFetchError = `ランキング取得失敗: ${response.status}`;
+      rerenderLobbyWithLatestRanking();
+      return;
+    }
+    const payload = (await response.json()) as RankingResponse;
+    rankingEntries = Array.isArray(payload.entries) ? payload.entries : [];
+    rankingFetchError = '';
+    rankingLastFetchedAtMs = nowMs;
+    rerenderLobbyWithLatestRanking();
+  } catch {
+    rankingFetchError = 'ランキングAPI未接続';
+    rerenderLobbyWithLatestRanking();
+  }
+}
+
+function rerenderLobbyWithLatestRanking(): void {
+  if (lobby.classList.contains('hidden')) {
+    return;
+  }
+  const container = document.getElementById('ranking-board');
+  if (!container) {
+    return;
+  }
+  container.innerHTML = renderRankingBoard();
+}
+
+function renderRankingBoard(): string {
+  if (rankingEntries.length === 0) {
+    return `<p class=\"muted\">${escapeHtml(rankingFetchError || 'ランキングデータなし')}</p>`;
+  }
+
+  return `
+    <ol>
+      ${rankingEntries
+        .slice(0, 8)
+        .map((entry) => {
+          return `<li>${escapeHtml(entry.name)} - 勝率 ${(entry.winRate * 100).toFixed(1)}% / 平均制覇 ${(entry.avgCaptureRatio * 100).toFixed(1)}% / 最高 ${entry.bestScore}</li>`;
+        })
+        .join('')}
+    </ol>
+  `;
+}
+
 function renderLobby(players: LobbyPlayer[], running: boolean, canStart: boolean, spectatorCount: number): void {
   lobby.classList.remove('hidden');
 
@@ -262,6 +455,10 @@ function renderLobby(players: LobbyPlayer[], running: boolean, canStart: boolean
 
       <label>名前
         <input id="name-input" value="${escapeHtml(playerName)}" maxlength="16" />
+      </label>
+
+      <label>ルームID
+        <input id="room-input" value="${escapeHtml(roomId)}" maxlength="24" />
       </label>
 
       <label>参加モード
@@ -287,6 +484,7 @@ function renderLobby(players: LobbyPlayer[], running: boolean, canStart: boolean
 
       <button id="save-profile">設定を保存</button>
       <button id="start-game" ${isHost && canStart && !running ? '' : 'disabled'}>${running ? '進行中' : 'テスト開始'}</button>
+      <p class="muted">room: ${escapeHtml(roomId)}</p>
       <p class="muted">${lobbyMessage || 'Host が開始します。観戦者は進行中でも接続可能です。'}</p>
 
       <h2>ロビー</h2>
@@ -307,8 +505,11 @@ function renderLobby(players: LobbyPlayer[], running: boolean, canStart: boolean
           .join('')}
       </ul>
 
+      <h2>永続ランキング</h2>
+      <div id="ranking-board">${renderRankingBoard()}</div>
+
       <p class="hint">AI-onlyテスト: 観戦モード + AI人数(2/5など) で開始</p>
-      <p class="hint">プレイヤー操作: 方向キー/WASD, 覚醒: Space/E/Enter</p>
+      <p class="hint">プレイヤー操作: 方向キー/WASD, 覚醒: Space/E/Enter, ピン: G(注目)/V(危険)/B(救助)</p>
     </div>
   `;
 
@@ -317,16 +518,19 @@ function renderLobby(players: LobbyPlayer[], running: boolean, canStart: boolean
 
   saveProfile?.addEventListener('click', () => {
     const nameInput = document.getElementById('name-input') as HTMLInputElement | null;
+    const roomInput = document.getElementById('room-input') as HTMLInputElement | null;
     const modeSelect = document.getElementById('mode-select') as HTMLSelectElement | null;
     const aiInput = document.getElementById('ai-count') as HTMLInputElement | null;
     const minutesInput = document.getElementById('test-minutes') as HTMLInputElement | null;
 
     playerName = nameInput?.value.trim().slice(0, 16) || playerName;
+    roomId = (roomInput?.value.trim().slice(0, 24) || roomId).replace(/[^a-zA-Z0-9_-]/g, '') || 'main';
     preferSpectator = modeSelect?.value === 'spectator';
     requestedAiCount = normalizeNumber(aiInput?.value ?? '', requestedAiCount, 0, 100);
     requestedTestMinutes = normalizeNumber(minutesInput?.value ?? '', requestedTestMinutes, 1, 10);
 
     localStorage.setItem('mmo-packman-name', playerName);
+    localStorage.setItem('mmo-packman-room', roomId);
     localStorage.setItem('mmo-packman-spectator', preferSpectator ? '1' : '0');
     localStorage.setItem('mmo-packman-ai-count', String(requestedAiCount));
     localStorage.setItem('mmo-packman-test-minutes', String(requestedTestMinutes));
@@ -361,29 +565,184 @@ function showResult(): void {
   }
 
   result.classList.remove('hidden');
+  const awards = renderAwards(summary.awards);
   const ranking = summary.ranking
     .slice(0, 8)
     .map((entry, index) => {
       return `<li>${index + 1}. ${escapeHtml(entry.name)} - ${entry.score}pt (dot:${entry.dots}, ghost:${entry.ghosts}, rescue:${entry.rescues})</li>`;
     })
     .join('');
+  const replaySection = latestReplayLog
+    ? `
+      <p class="muted">seed: ${latestReplayLog.seed} / frame: ${latestReplayLog.frames.length}</p>
+      <div class="replay-inline">
+        <button id="replay-open-latest" type="button">リプレイ再生</button>
+        <button id="replay-export" type="button">JSON保存</button>
+      </div>
+    `
+    : '<p class="muted">この試合のリプレイはまだ生成されていません。</p>';
 
   result.innerHTML = `
     <div class="panel">
       <h2>ゲーム終了: ${summary.reason}</h2>
       <p>制覇率: ${(summary.captureRatio * 100).toFixed(1)}%</p>
+      <h3>表彰</h3>
+      ${awards}
       <h3>ランキング</h3>
       <ol>${ranking}</ol>
       <h3>タイムライン</h3>
       <ul>${summary.timeline.slice(-12).map((t) => `<li>${formatMs(t.atMs)} ${escapeHtml(t.label)}</li>`).join('')}</ul>
+      <h3>リプレイ</h3>
+      ${replaySection}
+      <label class="replay-file">リプレイJSON読込
+        <input id="replay-import" type="file" accept=\".json,application/json\" />
+      </label>
       <button id="close-result">閉じる</button>
     </div>
   `;
 
   const close = document.getElementById('close-result');
+  const openReplayButton = document.getElementById('replay-open-latest');
+  const exportReplayButton = document.getElementById('replay-export');
+  const importReplayInput = document.getElementById('replay-import') as HTMLInputElement | null;
+
   close?.addEventListener('click', () => {
     result.classList.add('hidden');
   });
+  openReplayButton?.addEventListener('click', () => {
+    if (!latestReplayLog) {
+      return;
+    }
+    openReplay(latestReplayLog);
+  });
+  exportReplayButton?.addEventListener('click', () => {
+    if (!latestReplayLog) {
+      return;
+    }
+    exportReplay(latestReplayLog);
+  });
+  importReplayInput?.addEventListener('change', () => {
+    const file = importReplayInput.files?.[0];
+    if (!file) {
+      return;
+    }
+    void importReplayFromFile(file);
+    importReplayInput.value = '';
+  });
+}
+
+function normalizeSummary(raw: GameSummary): GameSummary {
+  return {
+    ...raw,
+    awards: raw.awards ?? [],
+  };
+}
+
+function normalizeSnapshot(raw: Snapshot): Snapshot {
+  return {
+    ...raw,
+    pings: raw.pings ?? [],
+  };
+}
+
+function cloneWorld(raw: WorldInit): WorldInit {
+  return {
+    ...raw,
+    tiles: [...raw.tiles],
+    sectors: raw.sectors.map((sector) => ({ ...sector })),
+    gates: raw.gates.map((gate) => ({
+      ...gate,
+      a: { ...gate.a },
+      b: { ...gate.b },
+      switchA: { ...gate.switchA },
+      switchB: { ...gate.switchB },
+    })),
+    dots: raw.dots.map(([x, y]) => [x, y]),
+    powerPellets: raw.powerPellets.map((pellet) => ({ ...pellet })),
+  };
+}
+
+function cloneSnapshot(raw: Snapshot): Snapshot {
+  return {
+    ...raw,
+    players: raw.players.map((player) => ({ ...player })),
+    ghosts: raw.ghosts.map((ghost) => ({ ...ghost })),
+    fruits: raw.fruits.map((fruit) => ({ ...fruit })),
+    sectors: raw.sectors.map((sector) => ({ ...sector })),
+    gates: raw.gates.map((gate) => ({
+      ...gate,
+      a: { ...gate.a },
+      b: { ...gate.b },
+      switchA: { ...gate.switchA },
+      switchB: { ...gate.switchB },
+    })),
+    pings: raw.pings.map((ping) => ({ ...ping })),
+    events: raw.events.map((event) => ({ ...event })),
+    timeline: raw.timeline.map((item) => ({ ...item })),
+  };
+}
+
+function captureReplayFrame(state: Snapshot): ReplayFrame {
+  return {
+    snapshot: cloneSnapshot(state),
+    dots: Array.from(dotSet.values()),
+    pellets: Array.from(pelletMap.values()).map((pellet) => ({
+      key: dotKey(pellet.x, pellet.y),
+      x: pellet.x,
+      y: pellet.y,
+      active: pellet.active,
+    })),
+  };
+}
+
+function cloneReplayFrame(raw: ReplayFrame): ReplayFrame {
+  return {
+    snapshot: cloneSnapshot(raw.snapshot),
+    dots: [...raw.dots],
+    pellets: raw.pellets.map((pellet) => ({ ...pellet })),
+  };
+}
+
+function restoreReplayBoardState(frame: ReplayFrame): void {
+  dotSet.clear();
+  for (const key of frame.dots) {
+    dotSet.add(key);
+  }
+
+  pelletMap.clear();
+  const pellets =
+    frame.pellets.length > 0
+      ? frame.pellets
+      : (world?.powerPellets.map((pellet) => ({
+          key: pellet.key,
+          x: pellet.x,
+          y: pellet.y,
+          active: pellet.active,
+        })) ?? []);
+  for (const pellet of pellets) {
+    pelletMap.set(pellet.key, {
+      x: pellet.x,
+      y: pellet.y,
+      active: pellet.active,
+    });
+  }
+}
+
+function renderAwards(awards: AwardEntry[]): string {
+  if (awards.length === 0) {
+    return '<p class="muted">該当する表彰はありません。</p>';
+  }
+
+  return `
+    <ul>
+      ${awards
+        .map((award) => {
+          const winnerNames = award.winners.map((winner) => escapeHtml(winner.name)).join(', ');
+          return `<li><strong>${escapeHtml(award.title)}</strong> (${escapeHtml(award.metricLabel)}: ${award.value}) - ${winnerNames}</li>`;
+        })
+        .join('')}
+    </ul>
+  `;
 }
 
 function wireKeyboard(): void {
@@ -397,19 +756,53 @@ function wireKeyboard(): void {
     a: 'left',
     d: 'right',
   };
+  const pingMap: Record<string, PingType> = {
+    g: 'focus',
+    v: 'danger',
+    b: 'help',
+  };
 
   window.addEventListener('keydown', (event) => {
     const rawKey = event.key;
     const key = rawKey.length === 1 ? rawKey.toLowerCase() : rawKey;
+    const typingInForm = isTypingInFormElement(event.target);
 
     if (isSpectator) {
+      if (typingInForm) {
+        return;
+      }
+      const pingKind = pingMap[key];
+      if (pingKind) {
+        event.preventDefault();
+        placePing(pingKind);
+        return;
+      }
       if (rawKey === 'Tab' || rawKey === ']' || key === 'e') {
         event.preventDefault();
         cycleSpectatorTarget(1);
       } else if (rawKey === '[' || key === 'q') {
         event.preventDefault();
         cycleSpectatorTarget(-1);
+      } else if (key === '+' || key === '=' || rawKey === 'PageUp') {
+        event.preventDefault();
+        adjustSpectatorZoom(1);
+      } else if (key === '-' || rawKey === 'PageDown') {
+        event.preventDefault();
+        adjustSpectatorZoom(-1);
+      } else {
+        const panDir = dirMap[key];
+        if (panDir) {
+          event.preventDefault();
+          panSpectatorCamera(panDir);
+        }
       }
+      return;
+    }
+
+    const pingKind = pingMap[key];
+    if (pingKind) {
+      event.preventDefault();
+      placePing(pingKind);
       return;
     }
 
@@ -472,6 +865,25 @@ function updateTouchControlsVisibility(): void {
   }
 }
 
+function placePing(kind: PingType): void {
+  if (isSpectator) {
+    pushLog('観戦モードではピン送信できません');
+    return;
+  }
+  if (!snapshot) {
+    return;
+  }
+  const me = snapshot.players.find((player) => player.id === meId);
+  if (!me) {
+    return;
+  }
+
+  send({
+    type: 'place_ping',
+    kind,
+  });
+}
+
 function cycleSpectatorTarget(delta = 1): void {
   if (!snapshot) {
     return;
@@ -485,6 +897,8 @@ function cycleSpectatorTarget(delta = 1): void {
   if (!followPlayerId) {
     const best = [...players].sort((a, b) => b.score - a.score)[0];
     followPlayerId = best?.id ?? null;
+    spectatorCameraMode = 'follow';
+    freeCameraCenter = null;
     updateStatusPanels();
     return;
   }
@@ -494,6 +908,8 @@ function cycleSpectatorTarget(delta = 1): void {
   const nextIndex = (normalized + delta + players.length) % players.length;
   const next = players[nextIndex];
   followPlayerId = next?.id ?? followPlayerId;
+  spectatorCameraMode = 'follow';
+  freeCameraCenter = null;
   updateStatusPanels();
 }
 
@@ -505,13 +921,398 @@ function initSpectatorControls(): void {
       <span id="spectator-target">auto</span>
       <button id="spectator-next" type="button">▶</button>
     </div>
-    <div class="hint">Tab / ] / E: 次, [ / Q: 前</div>
+    <div class="spec-row">
+      <button id="spectator-mode" type="button">追従モード</button>
+      <button id="spectator-zoom-out" type="button">-</button>
+      <span id="spectator-zoom">100%</span>
+      <button id="spectator-zoom-in" type="button">+</button>
+    </div>
+    <canvas id="spectator-minimap" width="220" height="220"></canvas>
+    <div class="hint">Tab / ] / E: 次, [ / Q: 前, WASD/矢印: パン, +/-: ズーム</div>
+    <div class="hint">ミニマップをクリックでフォーカス切替/自由カメラ移動</div>
   `;
 
   const prev = document.getElementById('spectator-prev');
   const next = document.getElementById('spectator-next');
   prev?.addEventListener('click', () => cycleSpectatorTarget(-1));
   next?.addEventListener('click', () => cycleSpectatorTarget(1));
+
+  const modeButton = document.getElementById('spectator-mode');
+  modeButton?.addEventListener('click', () => toggleSpectatorCameraMode());
+
+  const zoomOut = document.getElementById('spectator-zoom-out');
+  const zoomIn = document.getElementById('spectator-zoom-in');
+  zoomOut?.addEventListener('click', () => adjustSpectatorZoom(-1));
+  zoomIn?.addEventListener('click', () => adjustSpectatorZoom(1));
+
+  spectatorMinimapCanvas = document.getElementById('spectator-minimap') as HTMLCanvasElement | null;
+  spectatorMinimapCtx = spectatorMinimapCanvas?.getContext('2d') ?? null;
+  spectatorMinimapCanvas?.addEventListener('click', (event) => handleMinimapClick(event));
+
+  canvas.addEventListener(
+    'wheel',
+    (event) => {
+      if (!isSpectator) {
+        return;
+      }
+      event.preventDefault();
+      adjustSpectatorZoom(event.deltaY < 0 ? 1 : -1);
+    },
+    { passive: false },
+  );
+}
+
+function toggleSpectatorCameraMode(): void {
+  if (!isSpectator || !world || !snapshot) {
+    return;
+  }
+  if (spectatorCameraMode === 'follow') {
+    spectatorCameraMode = 'free';
+    const center = resolveCameraCenter(world, snapshot);
+    freeCameraCenter = { x: center.x, y: center.y };
+  } else {
+    spectatorCameraMode = 'follow';
+    freeCameraCenter = null;
+  }
+  updateStatusPanels();
+}
+
+function panSpectatorCamera(dir: 'up' | 'down' | 'left' | 'right'): void {
+  if (!isSpectator || !world || !snapshot) {
+    return;
+  }
+  if (spectatorCameraMode !== 'free') {
+    spectatorCameraMode = 'free';
+    const center = resolveCameraCenter(world, snapshot);
+    freeCameraCenter = { x: center.x, y: center.y };
+  }
+  const step = Math.max(1, Math.round(2 / spectatorZoom));
+  const current = freeCameraCenter ?? { x: world.width / 2, y: world.height / 2 };
+  const next = { ...current };
+  if (dir === 'up') {
+    next.y -= step;
+  } else if (dir === 'down') {
+    next.y += step;
+  } else if (dir === 'left') {
+    next.x -= step;
+  } else if (dir === 'right') {
+    next.x += step;
+  }
+  freeCameraCenter = clampCameraCenter(world, next.x, next.y);
+  updateStatusPanels();
+}
+
+function adjustSpectatorZoom(direction: 1 | -1): void {
+  if (!isSpectator) {
+    return;
+  }
+  spectatorZoom = clampNumber(spectatorZoom + direction * 0.1, 0.6, 2.4);
+  updateStatusPanels();
+}
+
+function handleMinimapClick(event: MouseEvent): void {
+  if (!isSpectator || !world || !snapshot || !spectatorMinimapCanvas) {
+    return;
+  }
+  const rect = spectatorMinimapCanvas.getBoundingClientRect();
+  const ratioX = clampNumber((event.clientX - rect.left) / rect.width, 0, 1);
+  const ratioY = clampNumber((event.clientY - rect.top) / rect.height, 0, 1);
+  const worldX = ratioX * Math.max(1, world.width - 1) + 0.5;
+  const worldY = ratioY * Math.max(1, world.height - 1) + 0.5;
+
+  let nearest: PlayerView | null = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  for (const player of snapshot.players) {
+    const distance = Math.hypot(player.x + 0.5 - worldX, player.y + 0.5 - worldY);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearest = player;
+    }
+  }
+
+  if (nearest && nearestDistance <= 4) {
+    followPlayerId = nearest.id;
+    spectatorCameraMode = 'follow';
+    freeCameraCenter = null;
+  } else {
+    spectatorCameraMode = 'free';
+    freeCameraCenter = clampCameraCenter(world, worldX, worldY);
+  }
+  updateStatusPanels();
+}
+
+function drawSpectatorMinimap(
+  worldState: WorldInit,
+  state: Snapshot,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+): void {
+  if (!isSpectator || !spectatorMinimapCanvas || !spectatorMinimapCtx) {
+    return;
+  }
+  const miniWidth = spectatorMinimapCanvas.width;
+  const miniHeight = spectatorMinimapCanvas.height;
+  const mapScaleX = miniWidth / worldState.width;
+  const mapScaleY = miniHeight / worldState.height;
+  const miniCtx = spectatorMinimapCtx;
+
+  miniCtx.clearRect(0, 0, miniWidth, miniHeight);
+  miniCtx.fillStyle = 'rgba(4, 8, 16, 0.96)';
+  miniCtx.fillRect(0, 0, miniWidth, miniHeight);
+  miniCtx.strokeStyle = 'rgba(160, 198, 255, 0.28)';
+  miniCtx.strokeRect(0, 0, miniWidth, miniHeight);
+
+  for (const sector of state.sectors) {
+    const x = sector.x * mapScaleX;
+    const y = sector.y * mapScaleY;
+    const width = Math.max(1, sector.size * mapScaleX);
+    const height = Math.max(1, sector.size * mapScaleY);
+    if (!sector.discovered) {
+      miniCtx.fillStyle = '#090b12';
+    } else if (sector.captured) {
+      miniCtx.fillStyle = '#184b66';
+    } else {
+      miniCtx.fillStyle = '#13213b';
+    }
+    miniCtx.fillRect(x, y, width, height);
+  }
+
+  for (const player of state.players) {
+    const px = (player.x + 0.5) * mapScaleX;
+    const py = (player.y + 0.5) * mapScaleY;
+    miniCtx.beginPath();
+    miniCtx.arc(px, py, 3.2, 0, Math.PI * 2);
+    miniCtx.fillStyle = player.id === followPlayerId ? '#ffe784' : '#ffb36c';
+    miniCtx.fill();
+    if (player.id === followPlayerId) {
+      miniCtx.beginPath();
+      miniCtx.arc(px, py, 5.2, 0, Math.PI * 2);
+      miniCtx.strokeStyle = 'rgba(255, 240, 174, 0.9)';
+      miniCtx.stroke();
+    }
+  }
+
+  const viewportX = minX * mapScaleX;
+  const viewportY = minY * mapScaleY;
+  const viewportWidth = Math.max(2, (maxX - minX + 1) * mapScaleX);
+  const viewportHeight = Math.max(2, (maxY - minY + 1) * mapScaleY);
+  miniCtx.strokeStyle = 'rgba(113, 236, 255, 0.88)';
+  miniCtx.lineWidth = 1.2;
+  miniCtx.strokeRect(viewportX, viewportY, viewportWidth, viewportHeight);
+}
+
+function initAudioSettingsPanel(): void {
+  audioSettingsPanel.innerHTML = `
+    <div class="sound-title">サウンド設定</div>
+    <div class="sound-row">
+      <input id="sound-mute" type="checkbox" />
+      <label for="sound-mute">ミュート</label>
+    </div>
+    <label><span id="sound-volume-label">音量</span>
+      <input id="sound-volume" type="range" min="0" max="100" />
+    </label>
+    <div id="sound-status" class="hint"></div>
+  `;
+
+  soundMuteInputElement = document.getElementById('sound-mute') as HTMLInputElement | null;
+  soundVolumeInputElement = document.getElementById('sound-volume') as HTMLInputElement | null;
+  soundStatusElement = document.getElementById('sound-status');
+  soundVolumeLabelElement = document.getElementById('sound-volume-label');
+
+  soundMuteInputElement?.addEventListener('change', () => {
+    soundMuted = !!soundMuteInputElement?.checked;
+    localStorage.setItem(SOUND_MUTED_KEY, soundMuted ? '1' : '0');
+    updateAudioGain();
+    refreshAudioSettingsPanel();
+  });
+
+  soundVolumeInputElement?.addEventListener('input', () => {
+    const currentPercent = Math.round(soundVolume * 100);
+    const value = normalizeNumber(soundVolumeInputElement?.value ?? '', currentPercent, 0, 100);
+    soundVolume = value / 100;
+    localStorage.setItem(SOUND_VOLUME_KEY, String(value));
+    updateAudioGain();
+    refreshAudioSettingsPanel();
+  });
+
+  refreshAudioSettingsPanel();
+}
+
+function refreshAudioSettingsPanel(): void {
+  const volumePercent = Math.round(soundVolume * 100);
+  const statusText = audioUnlocked
+    ? 'サウンド有効'
+    : '初回操作（タップ/キー入力）後に再生されます';
+
+  if (soundMuteInputElement) {
+    soundMuteInputElement.checked = soundMuted;
+  }
+  if (soundVolumeInputElement) {
+    soundVolumeInputElement.value = String(volumePercent);
+  }
+  if (soundStatusElement) {
+    soundStatusElement.textContent = statusText;
+  }
+  if (soundVolumeLabelElement) {
+    soundVolumeLabelElement.textContent = `音量 (${volumePercent}%)`;
+  }
+}
+
+function wireAudioUnlock(): void {
+  const unlock = () => {
+    void ensureAudioUnlocked();
+  };
+
+  window.addEventListener('pointerdown', unlock, { passive: true });
+  window.addEventListener('keydown', unlock);
+  window.addEventListener('touchstart', unlock, { passive: true });
+}
+
+async function ensureAudioUnlocked(): Promise<void> {
+  const audio = ensureAudioContext();
+  if (!audio) {
+    return;
+  }
+  if (audio.state === 'running') {
+    audioUnlocked = true;
+    refreshAudioSettingsPanel();
+    return;
+  }
+  try {
+    await audio.resume();
+  } catch {
+    return;
+  }
+  const resumedState = ensureAudioContext()?.state ?? audio.state;
+  audioUnlocked = resumedState === 'running';
+  refreshAudioSettingsPanel();
+}
+
+function ensureAudioContext(): AudioContext | null {
+  const AudioContextCtor = (window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext);
+  if (!AudioContextCtor) {
+    return null;
+  }
+  if (!audioContext) {
+    audioContext = new AudioContextCtor();
+    audioMasterGain = audioContext.createGain();
+    audioMasterGain.connect(audioContext.destination);
+    updateAudioGain();
+  }
+  return audioContext;
+}
+
+function updateAudioGain(): void {
+  if (!audioContext || !audioMasterGain) {
+    return;
+  }
+  const volume = soundMuted ? 0 : soundVolume;
+  audioMasterGain.gain.setTargetAtTime(volume, audioContext.currentTime, 0.01);
+}
+
+function playSoundForEvent(event: RuntimeEvent): void {
+  if (event.type === 'sector_captured') {
+    playTonePattern([
+      { frequency: 660, durationMs: 90, type: 'triangle' },
+      { frequency: 920, durationMs: 120, type: 'triangle' },
+    ]);
+    return;
+  }
+  if (event.type === 'player_down') {
+    playTonePattern([{ frequency: 190, durationMs: 200, type: 'sawtooth' }]);
+    return;
+  }
+  if (event.type === 'boss_spawned') {
+    playTonePattern([
+      { frequency: 220, durationMs: 120, type: 'sawtooth' },
+      { frequency: 180, durationMs: 130, type: 'sawtooth' },
+      { frequency: 140, durationMs: 170, type: 'sawtooth' },
+    ]);
+  }
+}
+
+function playAwakenTransitions(previous: Snapshot | null, next: Snapshot): void {
+  if (!previous) {
+    return;
+  }
+
+  const previousStateByPlayerId = new Map(previous.players.map((player) => [player.id, player.state] as const));
+  const awakened = next.players.some((player) => previousStateByPlayerId.get(player.id) !== 'power' && player.state === 'power');
+  if (awakened) {
+    playAwakenSound();
+  }
+}
+
+function playAwakenSound(): void {
+  playTonePattern([
+    { frequency: 760, durationMs: 80, type: 'triangle' },
+    { frequency: 1020, durationMs: 80, type: 'triangle' },
+    { frequency: 1360, durationMs: 110, type: 'triangle' },
+  ]);
+}
+
+function playSoundForGameOver(reason: GameSummary['reason']): void {
+  if (reason === 'victory') {
+    playTonePattern([
+      { frequency: 740, durationMs: 100, type: 'triangle' },
+      { frequency: 980, durationMs: 110, type: 'triangle' },
+      { frequency: 1320, durationMs: 160, type: 'triangle' },
+    ]);
+    return;
+  }
+  playTonePattern([
+    { frequency: 280, durationMs: 120, type: 'square' },
+    { frequency: 220, durationMs: 120, type: 'square' },
+    { frequency: 180, durationMs: 170, type: 'square' },
+  ]);
+}
+
+function playTonePattern(
+  tones: Array<{ frequency: number; durationMs: number; type?: OscillatorType }>,
+): void {
+  if (soundMuted || soundVolume <= 0) {
+    return;
+  }
+
+  const audio = ensureAudioContext();
+  const master = audioMasterGain;
+  if (!audio || !master) {
+    return;
+  }
+  if (audio.state !== 'running') {
+    audioUnlocked = false;
+    refreshAudioSettingsPanel();
+    void ensureAudioUnlocked();
+    return;
+  }
+  if (!audioUnlocked) {
+    audioUnlocked = true;
+    refreshAudioSettingsPanel();
+  }
+
+  let offsetMs = 0;
+  for (const tone of tones) {
+    const oscillator = audio.createOscillator();
+    const gain = audio.createGain();
+    const startAt = audio.currentTime + offsetMs / 1000;
+    const durationSec = tone.durationMs / 1000;
+    const type = tone.type ?? 'sine';
+
+    oscillator.type = type;
+    oscillator.frequency.setValueAtTime(tone.frequency, startAt);
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.linearRampToValueAtTime(0.65, startAt + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + durationSec);
+
+    oscillator.connect(gain);
+    gain.connect(master);
+    oscillator.start(startAt);
+    oscillator.stop(startAt + durationSec + 0.02);
+
+    offsetMs += tone.durationMs + 24;
+  }
 }
 
 function updateStatusPanels(): void {
@@ -555,11 +1356,20 @@ function updateSpectatorControls(): void {
     return;
   }
 
-  resolveFocusPlayer(snapshot);
   spectatorControls.classList.remove('hidden');
   const targetText = document.getElementById('spectator-target');
   if (targetText) {
     targetText.textContent = currentFollowName(snapshot.players);
+  }
+
+  const modeButton = document.getElementById('spectator-mode');
+  if (modeButton) {
+    modeButton.textContent = spectatorCameraMode === 'follow' ? '追従モード' : '自由カメラ';
+  }
+
+  const zoomText = document.getElementById('spectator-zoom');
+  if (zoomText) {
+    zoomText.textContent = `${Math.round(spectatorZoom * 100)}%`;
   }
 }
 
@@ -574,12 +1384,28 @@ function updateHud(): void {
   const ghosts = snapshot.ghosts.length;
   const fruits = snapshot.fruits.length;
   const modeText = isSpectator ? '観戦' : 'プレイ';
+  const cameraModeText = spectatorCameraMode === 'follow' ? '追従' : '自由';
 
   const meLine = isSpectator
-    ? `<p>mode: ${modeText} | follow: ${escapeHtml(currentFollowName(snapshot.players))}</p>`
+    ? `<p>mode: ${modeText} | cam: ${cameraModeText} (${Math.round(spectatorZoom * 100)}%) | follow: ${escapeHtml(currentFollowName(snapshot.players))}</p>`
     : me
       ? `<p>mode: ${modeText}</p><p>自分: ${escapeHtml(me.name)} | score ${me.score} | 状態: ${me.state}</p>`
       : '<p>自分の情報なし</p>';
+  const replayControls = replayPlayback
+    ? `
+      <h4>Replay</h4>
+      <p>seed: ${replayPlayback.log.seed} / speed: x${replayPlayback.speed.toFixed(1)} / frame: ${replayPlayback.frameIndex + 1}/${replayPlayback.log.frames.length}</p>
+      <div class="replay-inline">
+        <button id="replay-toggle" type="button">${replayPlayback.playing ? '一時停止' : '再生'}</button>
+        <button id="replay-slower" type="button">-速度</button>
+        <button id="replay-faster" type="button">+速度</button>
+        <button id="replay-exit" type="button">終了</button>
+      </div>
+      <input id="replay-seek" type="range" min="0" max="1000" value="${Math.round(
+        replayPlayback.durationMs > 0 ? (replayPlayback.cursorMs / replayPlayback.durationMs) * 1000 : 0,
+      )}" />
+    `
+    : '';
 
   hud.innerHTML = `
     <div class="panel small">
@@ -588,11 +1414,14 @@ function updateHud(): void {
       <p>残り時間: ${formatMs(snapshot.timeLeftMs)}</p>
       <p>ゴースト: ${ghosts} / フルーツ: ${fruits}</p>
       <p>ダウン: ${downCount}</p>
+      <p>ピン: ${snapshot.pings.length} (G:注目 / V:危険 / B:救助)</p>
       ${meLine}
       <h4>イベント</h4>
       <ul>${logs.slice(-8).map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>
+      ${replayControls}
     </div>
   `;
+  wireReplayHudControls();
 }
 
 function currentFollowName(players: PlayerView[]): string {
@@ -605,7 +1434,215 @@ function currentFollowName(players: PlayerView[]): string {
 
 function renderFrame(): void {
   requestAnimationFrame(renderFrame);
+  advanceReplayPlayback();
   draw();
+}
+
+function wireReplayHudControls(): void {
+  if (!replayPlayback) {
+    return;
+  }
+
+  const toggle = document.getElementById('replay-toggle');
+  const slower = document.getElementById('replay-slower');
+  const faster = document.getElementById('replay-faster');
+  const exit = document.getElementById('replay-exit');
+  const seek = document.getElementById('replay-seek') as HTMLInputElement | null;
+
+  toggle?.addEventListener('click', () => {
+    if (!replayPlayback) {
+      return;
+    }
+    replayPlayback.playing = !replayPlayback.playing;
+    replayPlayback.lastPerfMs = performance.now();
+    updateHud();
+  });
+  slower?.addEventListener('click', () => changeReplaySpeed(-1));
+  faster?.addEventListener('click', () => changeReplaySpeed(1));
+  exit?.addEventListener('click', () => closeReplay());
+  seek?.addEventListener('input', () => {
+    if (!replayPlayback) {
+      return;
+    }
+    const ratio = clampNumber(Number(seek.value) / 1000, 0, 1);
+    replayPlayback.cursorMs = replayPlayback.durationMs * ratio;
+    const index = findReplayFrameIndex(replayPlayback.frameOffsetsMs, replayPlayback.cursorMs);
+    setReplayFrameIndex(index);
+    replayPlayback.playing = false;
+    replayPlayback.lastPerfMs = performance.now();
+    updateHud();
+  });
+}
+
+function advanceReplayPlayback(): void {
+  if (!replayPlayback) {
+    return;
+  }
+  if (!replayPlayback.playing) {
+    replayPlayback.lastPerfMs = performance.now();
+    return;
+  }
+  if (replayPlayback.durationMs <= 0) {
+    replayPlayback.playing = false;
+    return;
+  }
+
+  const now = performance.now();
+  const deltaMs = Math.max(0, now - replayPlayback.lastPerfMs);
+  replayPlayback.lastPerfMs = now;
+  replayPlayback.cursorMs = clampNumber(replayPlayback.cursorMs + deltaMs * replayPlayback.speed, 0, replayPlayback.durationMs);
+
+  const nextIndex = findReplayFrameIndex(replayPlayback.frameOffsetsMs, replayPlayback.cursorMs);
+  setReplayFrameIndex(nextIndex);
+
+  if (replayPlayback.cursorMs >= replayPlayback.durationMs) {
+    replayPlayback.playing = false;
+    updateHud();
+  }
+}
+
+function setReplayFrameIndex(index: number): void {
+  if (!replayPlayback) {
+    return;
+  }
+  const safeIndex = clampNumber(index, 0, replayPlayback.log.frames.length - 1);
+  const frame = replayPlayback.log.frames[safeIndex];
+  if (!frame) {
+    return;
+  }
+  if (safeIndex === replayPlayback.frameIndex && snapshot?.tick === frame.snapshot.tick) {
+    return;
+  }
+  replayPlayback.frameIndex = safeIndex;
+  snapshot = cloneSnapshot(frame.snapshot);
+  restoreReplayBoardState(frame);
+  latestSnapshotReceivedAtMs = performance.now();
+  playerInterpolation.clear();
+  ghostInterpolation.clear();
+  updateStatusPanels();
+  updateHud();
+}
+
+function changeReplaySpeed(direction: 1 | -1): void {
+  if (!replayPlayback) {
+    return;
+  }
+  const currentIndex = REPLAY_SPEED_OPTIONS.findIndex((speed) => speed === replayPlayback?.speed);
+  const start = currentIndex >= 0 ? currentIndex : 1;
+  const next = clampNumber(start + direction, 0, REPLAY_SPEED_OPTIONS.length - 1);
+  replayPlayback.speed = REPLAY_SPEED_OPTIONS[next] as number;
+  updateHud();
+}
+
+function openReplay(log: ReplayLog): void {
+  if (log.frames.length === 0) {
+    pushLog('リプレイに再生可能フレームがありません');
+    return;
+  }
+
+  if (replayPlayback) {
+    closeReplay();
+  }
+
+  replaySavedWorld = world ? cloneWorld(world) : null;
+  replaySavedSnapshot = snapshot ? cloneSnapshot(snapshot) : null;
+  replaySavedDots = Array.from(dotSet.values());
+  replaySavedPellets = Array.from(pelletMap.values()).map((pellet) => ({
+    key: dotKey(pellet.x, pellet.y),
+    x: pellet.x,
+    y: pellet.y,
+    active: pellet.active,
+  }));
+  replaySavedIsSpectator = isSpectator;
+  replaySavedCameraMode = spectatorCameraMode;
+  replaySavedFollowPlayerId = followPlayerId;
+
+  const firstNow = log.frames[0]?.snapshot.nowMs ?? 0;
+  const offsets = log.frames.map((frame) => Math.max(0, frame.snapshot.nowMs - firstNow));
+  const durationMs = offsets[offsets.length - 1] ?? 0;
+
+  replayPlayback = {
+    log,
+    frameOffsetsMs: offsets,
+    durationMs,
+    frameIndex: -1,
+    cursorMs: 0,
+    speed: 1,
+    playing: true,
+    lastPerfMs: performance.now(),
+  };
+  isSpectator = true;
+  spectatorCameraMode = 'follow';
+  followPlayerId = null;
+  updateTouchControlsVisibility();
+  world = cloneWorld(log.world);
+  result.classList.add('hidden');
+  setReplayFrameIndex(0);
+  pushLog(`Replay loaded: seed=${log.seed}, frame=${log.frames.length}`);
+}
+
+function closeReplay(): void {
+  if (!replayPlayback) {
+    return;
+  }
+
+  replayPlayback = null;
+  world = replaySavedWorld ? cloneWorld(replaySavedWorld) : world;
+  snapshot = replaySavedSnapshot ? cloneSnapshot(replaySavedSnapshot) : snapshot;
+  dotSet.clear();
+  for (const key of replaySavedDots ?? []) {
+    dotSet.add(key);
+  }
+  pelletMap.clear();
+  for (const pellet of replaySavedPellets ?? []) {
+    pelletMap.set(pellet.key, {
+      x: pellet.x,
+      y: pellet.y,
+      active: pellet.active,
+    });
+  }
+  replaySavedWorld = null;
+  replaySavedSnapshot = null;
+  replaySavedDots = null;
+  replaySavedPellets = null;
+  isSpectator = replaySavedIsSpectator ?? isSpectator;
+  spectatorCameraMode = replaySavedCameraMode ?? spectatorCameraMode;
+  followPlayerId = replaySavedFollowPlayerId ?? followPlayerId;
+  replaySavedIsSpectator = null;
+  replaySavedCameraMode = null;
+  replaySavedFollowPlayerId = null;
+  updateTouchControlsVisibility();
+  latestSnapshotReceivedAtMs = performance.now();
+  playerInterpolation.clear();
+  ghostInterpolation.clear();
+  updateStatusPanels();
+  updateHud();
+}
+
+function exportReplay(log: ReplayLog): void {
+  const payload = JSON.stringify(log);
+  const blob = new Blob([payload], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `mmo-packman-replay-${log.seed}-${Date.now()}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function importReplayFromFile(file: File): Promise<void> {
+  try {
+    const raw = await file.text();
+    const parsed = parseReplayLog(JSON.parse(raw) as unknown);
+    if (!parsed) {
+      pushLog('リプレイ形式を解釈できませんでした');
+      return;
+    }
+    latestReplayLog = parsed;
+    openReplay(parsed);
+  } catch {
+    pushLog('リプレイ読込に失敗しました');
+  }
 }
 
 function draw(): void {
@@ -623,7 +1660,10 @@ function draw(): void {
   const centerY = camera.y;
   const interpolationAlpha = getInterpolationAlpha();
 
-  const tileSize = Math.max(12, Math.min(30, Math.floor(Math.min(canvas.width, canvas.height) / 26)));
+  const baseTileSize = Math.floor(Math.min(canvas.width, canvas.height) / 26);
+  const tileSize = isSpectator
+    ? clampNumber(Math.floor(baseTileSize * spectatorZoom), 10, 54)
+    : Math.max(12, Math.min(30, baseTileSize));
   const originX = Math.floor(canvas.width / 2 - centerX * tileSize);
   const originY = Math.floor(canvas.height / 2 - centerY * tileSize);
 
@@ -643,7 +1683,15 @@ function draw(): void {
       const discovered = !!sector?.discovered;
 
       if (row[x] === '#') {
-        ctx.fillStyle = discovered ? '#2d4a8a' : '#0d0f17';
+        if (!discovered) {
+          ctx.fillStyle = '#0d0f17';
+        } else if (sector?.captured) {
+          ctx.fillStyle = '#10293c';
+        } else if (sector?.type === 'dark') {
+          ctx.fillStyle = '#101524';
+        } else {
+          ctx.fillStyle = '#0b1120';
+        }
         ctx.fillRect(sx, sy, tileSize, tileSize);
       } else {
         if (!discovered) {
@@ -663,6 +1711,7 @@ function draw(): void {
       }
     }
   }
+  drawWallOutlines(world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY);
 
   ctx.fillStyle = '#ffd66a';
   for (const key of dotSet) {
@@ -720,22 +1769,169 @@ function draw(): void {
     snapshot.nowMs,
     interpolationAlpha,
   );
+  drawPings(snapshot.pings, world, snapshot, originX, originY, tileSize, minX, minY, maxX, maxY, snapshot.nowMs);
+  drawSpectatorMinimap(world, snapshot, minX, minY, maxX, maxY);
+}
+
+function drawWallOutlines(
+  worldState: WorldInit,
+  state: Snapshot,
+  originX: number,
+  originY: number,
+  tileSize: number,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+): void {
+  const baseStroke = clampNumber(tileSize * 0.2, 1.4, 7.5);
+  const cornerRadius = clampNumber(tileSize * 0.22, 1.4, tileSize * 0.36);
+
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  for (let y = minY; y <= maxY; y += 1) {
+    const row = worldState.tiles[y] as string;
+    for (let x = minX; x <= maxX; x += 1) {
+      if (row[x] !== '#') {
+        continue;
+      }
+
+      const sector = sectorAt(worldState, state, x, y);
+      if (!sector || !sector.discovered) {
+        continue;
+      }
+      const sx = originX + x * tileSize;
+      const sy = originY + y * tileSize;
+      const wallPath = buildWallTilePath(worldState, x, y, sx, sy, tileSize, baseStroke, cornerRadius);
+      if (!wallPath) {
+        continue;
+      }
+
+      ctx.strokeStyle = wallOutlineOuterColor();
+      ctx.lineWidth = baseStroke * 1.25;
+      ctx.stroke(wallPath);
+      ctx.strokeStyle = wallOutlineColor(sector);
+      ctx.lineWidth = baseStroke * 0.78;
+      ctx.stroke(wallPath);
+    }
+  }
+
+  ctx.restore();
+}
+
+function buildWallTilePath(
+  worldState: WorldInit,
+  x: number,
+  y: number,
+  sx: number,
+  sy: number,
+  tileSize: number,
+  strokeWidth: number,
+  cornerRadius: number,
+): Path2D | null {
+  const topOpen = !isWallTile(worldState, x, y - 1);
+  const rightOpen = !isWallTile(worldState, x + 1, y);
+  const bottomOpen = !isWallTile(worldState, x, y + 1);
+  const leftOpen = !isWallTile(worldState, x - 1, y);
+  if (!topOpen && !rightOpen && !bottomOpen && !leftOpen) {
+    return null;
+  }
+
+  const inset = strokeWidth * 0.5 + 0.9;
+  const left = sx + (leftOpen ? inset : 0);
+  const right = sx + tileSize - (rightOpen ? inset : 0);
+  const top = sy + (topOpen ? inset : 0);
+  const bottom = sy + tileSize - (bottomOpen ? inset : 0);
+  const radius = Math.min(cornerRadius, Math.max(1.2, (right - left) * 0.5), Math.max(1.2, (bottom - top) * 0.5));
+
+  const path = new Path2D();
+  if (topOpen) {
+    path.moveTo(left + (leftOpen ? radius : 0), top);
+    path.lineTo(right - (rightOpen ? radius : 0), top);
+  }
+  if (rightOpen) {
+    path.moveTo(right, top + (topOpen ? radius : 0));
+    path.lineTo(right, bottom - (bottomOpen ? radius : 0));
+  }
+  if (bottomOpen) {
+    path.moveTo(right - (rightOpen ? radius : 0), bottom);
+    path.lineTo(left + (leftOpen ? radius : 0), bottom);
+  }
+  if (leftOpen) {
+    path.moveTo(left, bottom - (bottomOpen ? radius : 0));
+    path.lineTo(left, top + (topOpen ? radius : 0));
+  }
+
+  if (topOpen && rightOpen) {
+    path.moveTo(right - radius, top);
+    path.arc(right - radius, top + radius, radius, -Math.PI / 2, 0);
+  }
+  if (rightOpen && bottomOpen) {
+    path.moveTo(right, bottom - radius);
+    path.arc(right - radius, bottom - radius, radius, 0, Math.PI / 2);
+  }
+  if (bottomOpen && leftOpen) {
+    path.moveTo(left + radius, bottom);
+    path.arc(left + radius, bottom - radius, radius, Math.PI / 2, Math.PI);
+  }
+  if (leftOpen && topOpen) {
+    path.moveTo(left, top + radius);
+    path.arc(left + radius, top + radius, radius, Math.PI, Math.PI * 1.5);
+  }
+  return path;
+}
+
+function isWallTile(worldState: WorldInit, x: number, y: number): boolean {
+  if (x < 0 || y < 0 || x >= worldState.width || y >= worldState.height) {
+    return false;
+  }
+  const row = worldState.tiles[y];
+  if (!row) {
+    return false;
+  }
+  return row[x] === '#';
+}
+
+function wallOutlineColor(sector: Snapshot['sectors'][number]): string {
+  if (sector.captured) {
+    return '#79d8ff';
+  }
+  if (sector.type === 'dark') {
+    return '#5f8dbf';
+  }
+  return '#7bb8ff';
+}
+
+function wallOutlineOuterColor(): string {
+  return 'rgba(11, 24, 52, 0.86)';
 }
 
 function resolveCameraCenter(worldState: WorldInit, state: Snapshot): { x: number; y: number } {
+  if (isSpectator && spectatorCameraMode === 'free' && freeCameraCenter) {
+    return clampCameraCenter(worldState, freeCameraCenter.x, freeCameraCenter.y);
+  }
+
   const focus = resolveFocusPlayer(state);
   if (!focus) {
-    return { x: worldState.width / 2, y: worldState.height / 2 };
+    return clampCameraCenter(worldState, worldState.width / 2, worldState.height / 2);
   }
 
   const sector = sectorAt(worldState, state, focus.x, focus.y);
   if (!sector) {
-    return { x: focus.x + 0.5, y: focus.y + 0.5 };
+    return clampCameraCenter(worldState, focus.x + 0.5, focus.y + 0.5);
   }
 
+  return clampCameraCenter(worldState, sector.x + sector.size / 2, sector.y + sector.size / 2);
+}
+
+function clampCameraCenter(worldState: WorldInit, x: number, y: number): { x: number; y: number } {
+  const maxX = Math.max(0.5, worldState.width - 0.5);
+  const maxY = Math.max(0.5, worldState.height - 0.5);
   return {
-    x: sector.x + sector.size / 2,
-    y: sector.y + sector.size / 2,
+    x: clampNumber(x, 0.5, maxX),
+    y: clampNumber(y, 0.5, maxY),
   };
 }
 
@@ -749,13 +1945,19 @@ function resolveFocusPlayer(state: Snapshot): PlayerView | null {
     return null;
   }
 
-  let follow = followPlayerId ? members.find((player) => player.id === followPlayerId) : undefined;
-  if (!follow) {
-    follow = [...members].sort((a, b) => b.score - a.score)[0];
-    followPlayerId = follow?.id ?? null;
+  if (!followPlayerId) {
+    return [...members].sort((a, b) => b.score - a.score)[0] ?? null;
+  }
+  const followed = members.find((player) => player.id === followPlayerId);
+  if (followed) {
+    return followed;
   }
 
-  return follow ?? null;
+  const fallback = [...members].sort((a, b) => b.score - a.score)[0] ?? null;
+  if (spectatorCameraMode === 'follow') {
+    followPlayerId = fallback?.id ?? null;
+  }
+  return fallback;
 }
 
 function drawGates(
@@ -894,6 +2096,44 @@ function drawPlayers(
     ctx.fillStyle = '#f7f9ff';
     ctx.font = `${Math.max(9, Math.floor(tileSize * 0.36))}px monospace`;
     ctx.fillText(player.name.slice(0, 7), sx - tileSize * 0.45, sy - tileSize * 0.45);
+  }
+}
+
+function drawPings(
+  pings: PingView[],
+  worldState: WorldInit,
+  state: Snapshot,
+  originX: number,
+  originY: number,
+  tileSize: number,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+  nowMs: number,
+): void {
+  for (const ping of pings) {
+    if (ping.x < minX || ping.x > maxX || ping.y < minY || ping.y > maxY) {
+      continue;
+    }
+    const sector = sectorAt(worldState, state, ping.x, ping.y);
+    if (!sector?.discovered) {
+      continue;
+    }
+
+    const px = originX + ping.x * tileSize + tileSize / 2;
+    const py = originY + ping.y * tileSize + tileSize / 2;
+    const remainRatio = clampNumber((ping.expiresAtMs - nowMs) / Math.max(1, ping.expiresAtMs - ping.createdAtMs), 0, 1);
+    const pulse = 1 + 0.12 * Math.sin((nowMs / 180) % (Math.PI * 2));
+    const baseRadius = Math.max(5, tileSize * 0.35) * pulse;
+    const color = pingKindColor(ping.kind);
+
+    circle(px, py, baseRadius, `rgba(${color.r}, ${color.g}, ${color.b}, ${(0.25 + remainRatio * 0.45).toFixed(3)})`);
+    circle(px, py, Math.max(3, tileSize * 0.18), `rgb(${color.r}, ${color.g}, ${color.b})`);
+
+    ctx.fillStyle = `rgba(240, 248, 255, ${(0.55 + remainRatio * 0.45).toFixed(3)})`;
+    ctx.font = `${Math.max(9, Math.floor(tileSize * 0.28))}px monospace`;
+    ctx.fillText(`${pingKindLabel(ping.kind)} ${ping.ownerName.slice(0, 8)}`, px - tileSize * 0.55, py - tileSize * 0.58);
   }
 }
 
@@ -1112,6 +2352,32 @@ function fruitLabel(type: FruitView['type']): string {
   return 'グレープ';
 }
 
+function pingKindLabel(kind: PingType): string {
+  if (kind === 'focus') {
+    return '注目';
+  }
+  if (kind === 'danger') {
+    return '危険';
+  }
+  if (kind === 'help') {
+    return '救助';
+  }
+  return kind;
+}
+
+function pingKindColor(kind: PingType): { r: number; g: number; b: number } {
+  if (kind === 'focus') {
+    return { r: 104, g: 215, b: 255 };
+  }
+  if (kind === 'danger') {
+    return { r: 255, g: 124, b: 124 };
+  }
+  if (kind === 'help') {
+    return { r: 146, g: 255, b: 170 };
+  }
+  return { r: 218, g: 222, b: 233 };
+}
+
 function fruitColor(type: FruitView['type']): string {
   if (type === 'cherry') {
     return '#ff4f7b';
@@ -1165,6 +2431,20 @@ function normalizeNumber(input: string | null, fallback: number, min: number, ma
     return fallback;
   }
   return clampNumber(Math.floor(n), min, max);
+}
+
+function isTypingInFormElement(target: EventTarget | null): boolean {
+  const candidates = [document.activeElement, target instanceof HTMLElement ? target : null];
+  return candidates.some((candidate) => {
+    if (!(candidate instanceof HTMLElement)) {
+      return false;
+    }
+    if (candidate.isContentEditable) {
+      return true;
+    }
+    const tag = candidate.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+  });
 }
 
 function clampNumber(value: number, min: number, max: number): number {

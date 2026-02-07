@@ -69,6 +69,22 @@ npm run simulate -- --single --ai 5 --minutes 10 --difficulty normal
 npm run reference:ts:simulate -- --single --ai 5 --minutes 3 --difficulty normal
 ```
 
+## タイムラプスリプレイ
+
+- 生成/再生手順とフォーマット: [docs/replay_timelapse.md](./replay_timelapse.md)
+
+## 複数ルーム検証
+
+1. ロビーの `ルームID` に `room-a` / `room-b` など別値を入力して保存する。
+2. 別タブを開き、異なる `ルームID` を設定して接続する。
+3. それぞれのルームで開始し、進行が相互干渉しないことを確認する。
+
+## AOI差分同期検証
+
+- メトリクス計測: `npm run measure:aoi`
+- AOI無効化（従来配信）: `AOI_ENABLED=0` でサーバー起動
+- 半径調整: `AOI_RADIUS_TILES=<number>`
+
 ## 注意
 
 - Rust WebSocket サーバーは未実装のため、UI からの実プレイは現時点では未対応。

@@ -93,6 +93,7 @@ export interface GameEngineOptions {
 
 export class GameEngine {
   public readonly startedAtMs: number;
+  public readonly seed: number;
   public readonly config: GameConfig;
   public readonly world: GeneratedWorld;
 
@@ -120,6 +121,7 @@ export class GameEngine {
     seed = Date.now(),
     options: GameEngineOptions = {},
   ) {
+    this.seed = seed;
     this.rng = new Rng(seed);
     this.playerCount = startPlayers.length;
     this.startedAtMs = Date.now();
@@ -213,6 +215,18 @@ export class GameEngine {
     return this.players.has(playerId);
   }
 
+  public getNowMs(): number {
+    return this.startedAtMs + this.elapsedMs;
+  }
+
+  public getPlayerPosition(playerId: string): Vec2 | null {
+    const player = this.players.get(playerId);
+    if (!player) {
+      return null;
+    }
+    return { x: player.x, y: player.y };
+  }
+
   public getPlayerByToken(token: string): PlayerInternal | null {
     for (const player of this.players.values()) {
       if (player.reconnectToken === token) {
@@ -286,6 +300,7 @@ export class GameEngine {
       fruits: Array.from(this.fruits.values()).map((fruit) => ({ ...fruit })),
       sectors: this.world.sectors.map((sector) => this.toSectorView(sector)),
       gates: this.world.gates.map((gate) => ({ ...gate })),
+      pings: [],
       events: drainEvents ? this.events.splice(0, this.events.length) : [...this.events],
       timeline: this.timeline.slice(Math.max(0, this.timeline.length - 50)),
     };

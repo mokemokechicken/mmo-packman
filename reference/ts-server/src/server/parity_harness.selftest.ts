@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 
 import {
+  buildNpmArgs,
   compareResults,
   extractResultLine,
   isExpectedSimulatorExitStatus,
@@ -37,13 +38,22 @@ const metaDifferent: ScenarioResultLine = {
   minutes: 1,
   difficulty: 'hard',
 };
-assert.deepEqual(compareResults(base, metaDifferent, 0.2), []);
+const metaDiffs = compareResults(base, metaDifferent);
+assert(metaDiffs.some((item) => item.startsWith('scenario:')));
+assert(metaDiffs.some((item) => item.startsWith('seed:')));
+assert(metaDiffs.some((item) => item.startsWith('aiPlayers:')));
+assert(metaDiffs.some((item) => item.startsWith('minutes:')));
+assert(metaDiffs.some((item) => item.startsWith('difficulty:')));
 
 const reasonDifferent: ScenarioResultLine = {
   ...base,
   reason: 'all_down',
 };
-assert.deepEqual(compareResults(base, reasonDifferent, 0.2), ['reason: ts=timeout, rust=all_down']);
+assert.deepEqual(compareResults(base, reasonDifferent), ['reason: ts=timeout, rust=all_down']);
+
+const options = resolveOptions([]);
+assert.equal(buildNpmArgs('reference:ts:simulate', options, 4242)[1], 'reference:ts:simulate');
+assert.equal(buildNpmArgs('simulate:rust', options, 4242)[1], 'simulate:rust');
 
 const output = `noise\n${JSON.stringify(base)}\n`;
 assert.equal(extractResultLine(output, 'dummy').seed, base.seed);
@@ -64,7 +74,6 @@ assert.equal(isExpectedSimulatorExitStatus(1, 0), false);
 assert.equal(isExpectedSimulatorExitStatus(2, 3), false);
 
 assert.equal(resolveOptions(['--seed-start', '10', '--seed-count', '2']).seeds.join(','), '10,11');
-assert.throws(() => resolveOptions(['--capture-tolerance', 'abc']), /must be a number/);
 assert.throws(() => resolveOptions(['--seed-start', '-1']), /range/);
 
 console.log('parity harness selftest: OK');

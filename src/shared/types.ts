@@ -5,6 +5,7 @@ export type SectorType = 'normal' | 'narrow' | 'plaza' | 'dark' | 'fast' | 'nest
 export type FruitType = 'cherry' | 'strawberry' | 'orange' | 'apple' | 'key' | 'grape';
 export type Difficulty = 'casual' | 'normal' | 'hard' | 'nightmare';
 export type GameOverReason = 'victory' | 'timeout' | 'all_down' | 'collapse';
+export type PingType = 'focus' | 'danger' | 'help';
 
 export interface Vec2 {
   x: number;
@@ -103,6 +104,17 @@ export interface FruitView {
   spawnedAt: number;
 }
 
+export interface PingView {
+  id: string;
+  ownerId: string;
+  ownerName: string;
+  x: number;
+  y: number;
+  kind: PingType;
+  createdAtMs: number;
+  expiresAtMs: number;
+}
+
 export interface TimelineEvent {
   atMs: number;
   label: string;
@@ -133,6 +145,7 @@ export interface Snapshot {
   fruits: FruitView[];
   sectors: SectorState[];
   gates: GateState[];
+  pings: PingView[];
   events: RuntimeEvent[];
   timeline: TimelineEvent[];
 }
@@ -147,18 +160,49 @@ export interface ScoreEntry {
   captures: number;
 }
 
+export interface AwardWinner {
+  playerId: string;
+  name: string;
+}
+
+export interface AwardEntry {
+  id: 'rescue_king' | 'explorer_king' | 'defense_king' | 'ghost_hunter';
+  title: string;
+  metricLabel: string;
+  value: number;
+  winners: AwardWinner[];
+}
+
+export interface PersistentRankingEntry {
+  name: string;
+  matches: number;
+  wins: number;
+  winRate: number;
+  avgCaptureRatio: number;
+  avgRescues: number;
+  bestScore: number;
+  updatedAtMs: number;
+}
+
+export interface RankingResponse {
+  generatedAtIso: string;
+  entries: PersistentRankingEntry[];
+}
+
 export interface GameSummary {
   reason: GameOverReason;
   durationMs: number;
   captureRatio: number;
   timeline: TimelineEvent[];
   ranking: ScoreEntry[];
+  awards: AwardEntry[];
 }
 
 export type ClientMessage =
-  | { type: 'hello'; name: string; reconnectToken?: string; spectator?: boolean }
+  | { type: 'hello'; name: string; reconnectToken?: string; spectator?: boolean; roomId?: string }
   | { type: 'lobby_start'; difficulty?: Difficulty; aiPlayerCount?: number; timeLimitMinutes?: number }
   | { type: 'input'; dir?: Exclude<Direction, 'none'>; awaken?: boolean }
+  | { type: 'place_ping'; kind: PingType }
   | { type: 'ping'; t: number };
 
 export type ServerMessage =
@@ -184,6 +228,7 @@ export type ServerMessage =
       world: WorldInit;
       config: GameConfig;
       startedAtMs: number;
+      seed: number;
       isSpectator: boolean;
     }
   | {
