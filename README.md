@@ -21,6 +21,7 @@ npm run dev
 - `npm run check` 型チェック
 - `npm run build` 本番ビルド
 - `npm run test` Node 側の自己テスト
+- `npm run test:parity -- --seed-count 4 --minutes 1` TS/Rust parity 比較
 - `npm run simulate` Rust 実装の AI-only シミュレーション
 - `npm run simulate:rust -- --single --ai 10 --minutes 10 --difficulty normal` Rust実装シミュレータ
 - `npm run reference:ts:simulate -- --single --ai 5 --minutes 3 --difficulty normal` 退避したTS参考実装のシミュレータ
