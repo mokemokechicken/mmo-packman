@@ -14,6 +14,7 @@ import type {
 } from '../shared/types.js';
 import { GameEngine, type StartPlayer } from './game.js';
 import { PingManager } from './ping_manager.js';
+import { RankingStore } from './ranking_store.js';
 
 interface ClientContext {
   id: string;
@@ -30,9 +31,15 @@ const PORT = Number(process.env.PORT ?? 8080);
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
+const rankingStore = new RankingStore(path.resolve(process.cwd(), process.env.RANKING_DB_PATH ?? '.data/ranking.json'));
 
 app.get('/healthz', (_req, res) => {
   res.status(200).json({ ok: true });
+});
+
+app.get('/api/ranking', (req, res) => {
+  const limitRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined;
+  res.status(200).json(rankingStore.buildResponse(limitRaw));
 });
 
 const distClientDir = path.resolve(process.cwd(), 'dist/client');
@@ -361,6 +368,7 @@ function handleLobbyStart(
 
     if (running.isEnded()) {
       const summary = running.buildSummary();
+      rankingStore.recordMatch(summary);
       broadcast({ type: 'game_over', summary });
 
       if (loop) {
