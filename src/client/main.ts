@@ -1121,6 +1121,16 @@ function drawSpectatorMinimap(
     }
   }
 
+  miniCtx.lineWidth = 1.2;
+  for (const sector of state.sectors) {
+    const x = sector.x * mapScaleX;
+    const y = sector.y * mapScaleY;
+    const width = Math.max(1, sector.size * mapScaleX);
+    const height = Math.max(1, sector.size * mapScaleY);
+    miniCtx.strokeStyle = sector.discovered ? 'rgba(228, 239, 255, 0.58)' : 'rgba(118, 132, 156, 0.6)';
+    miniCtx.strokeRect(x + 0.5, y + 0.5, Math.max(0, width - 1), Math.max(0, height - 1));
+  }
+
   for (const ghost of state.ghosts) {
     const sector = sectorAt(worldState, state, ghost.x, ghost.y);
     if (!sector?.captured) {
@@ -1135,17 +1145,42 @@ function drawSpectatorMinimap(
   }
 
   for (const gate of worldState.gates) {
+    const ax = (gate.a.x + 0.5) * mapScaleX;
+    const ay = (gate.a.y + 0.5) * mapScaleY;
+    const bx = (gate.b.x + 0.5) * mapScaleX;
+    const by = (gate.b.y + 0.5) * mapScaleY;
+    const cx = (ax + bx) * 0.5;
+    const cy = (ay + by) * 0.5;
+    const gateColor = gate.open ? 'rgba(92, 228, 148, 0.98)' : 'rgba(255, 112, 112, 0.98)';
+
+    miniCtx.strokeStyle = gateColor;
+    miniCtx.lineWidth = gate.open ? 2.1 : 2.4;
+    miniCtx.lineCap = 'round';
+    miniCtx.beginPath();
+    miniCtx.moveTo(ax, ay);
+    miniCtx.lineTo(bx, by);
+    miniCtx.stroke();
+
+    miniCtx.fillStyle = gateColor;
+    miniCtx.beginPath();
+    miniCtx.arc(cx, cy, gate.open ? 1.8 : 2.1, 0, Math.PI * 2);
+    miniCtx.fill();
+
     if (gate.open) {
+      miniCtx.strokeStyle = 'rgba(220, 255, 233, 0.94)';
+      miniCtx.lineWidth = 1.1;
+      miniCtx.beginPath();
+      miniCtx.arc(cx, cy, 3.2, 0, Math.PI * 2);
+      miniCtx.stroke();
       continue;
     }
-    const cx = ((gate.a.x + gate.b.x) * 0.5 + 0.5) * mapScaleX;
-    const cy = ((gate.a.y + gate.b.y) * 0.5 + 0.5) * mapScaleY;
-    miniCtx.strokeStyle = 'rgba(255, 210, 98, 0.95)';
-    miniCtx.lineWidth = 1.1;
+
+    miniCtx.strokeStyle = 'rgba(255, 214, 122, 0.95)';
+    miniCtx.lineWidth = 1;
     miniCtx.beginPath();
     miniCtx.arc(cx, cy - 1.2, 1.8, Math.PI, 0);
     miniCtx.stroke();
-    miniCtx.fillStyle = 'rgba(255, 210, 98, 0.95)';
+    miniCtx.fillStyle = 'rgba(255, 214, 122, 0.95)';
     miniCtx.fillRect(cx - 1.5, cy - 1, 3, 3);
   }
 
@@ -1453,8 +1488,8 @@ function updateSpectatorControls(): void {
   const legend = document.getElementById('minimap-legend');
   if (legend) {
     legend.textContent = isSpectator
-      ? '白:自分  黄:プレイヤー  赤:ダウン  赤点:ゴースト(制覇エリア)  黄点滅:劣化中'
-      : '白:自分  黄:味方  赤点滅:ダウン  赤点:ゴースト(制覇エリア)  黄点滅:劣化中';
+      ? '白:自分  黄:プレイヤー  赤:ダウン  赤点:ゴースト(制覇エリア)  黄点滅:劣化中  門:緑(開)/赤(閉)'
+      : '白:自分  黄:味方  赤点滅:ダウン  赤点:ゴースト(制覇エリア)  黄点滅:劣化中  門:緑(開)/赤(閉)';
   }
 
   if (!isSpectator) {
