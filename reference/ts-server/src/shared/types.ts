@@ -198,6 +198,7 @@ export type ServerMessage =
       world: WorldInit;
       config: GameConfig;
       startedAtMs: number;
+      seed: number;
       isSpectator: boolean;
     }
   | {

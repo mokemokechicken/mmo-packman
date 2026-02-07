@@ -93,6 +93,7 @@ export interface GameEngineOptions {
 
 export class GameEngine {
   public readonly startedAtMs: number;
+  public readonly seed: number;
   public readonly config: GameConfig;
   public readonly world: GeneratedWorld;
 
@@ -120,6 +121,7 @@ export class GameEngine {
     seed = Date.now(),
     options: GameEngineOptions = {},
   ) {
+    this.seed = seed;
     this.rng = new Rng(seed);
     this.playerCount = startPlayers.length;
     this.startedAtMs = Date.now();
