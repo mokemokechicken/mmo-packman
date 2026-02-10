@@ -127,6 +127,9 @@ struct PlayerInternal {
     awaken_requested: bool,
     remote_revive_grace_until: u64,
     ai_think_at: u64,
+    ai_dot_target: Option<Vec2>,
+    ai_last_position: Vec2,
+    ai_last_progress_at: u64,
     hold_until_ms: u64,
     stats: PlayerStats,
 }
@@ -164,6 +167,8 @@ pub struct GameEngine {
     tick_counter: u64,
     max_capture_ratio: f32,
     milestone_emitted: HashSet<i32>,
+    ai_sector_dot_memory: Vec<Vec<Vec2>>,
+    ai_dot_memory_updated_at: u64,
     next_id_counter: u64,
 }
 
@@ -178,6 +183,7 @@ impl GameEngine {
         let player_count = start_players.len();
         let started_at_ms = now_ms();
         let world = generate_world(player_count, seed);
+        let sector_count = world.sectors.len();
         let max_ghosts = get_initial_ghost_count(player_count);
         let difficulty_multiplier = get_difficulty_multiplier(difficulty);
 
@@ -227,6 +233,9 @@ impl GameEngine {
                 awaken_requested: false,
                 remote_revive_grace_until: started_at_ms + INITIAL_SPAWN_GRACE_MS,
                 ai_think_at: rng.int(50, 180) as u64,
+                ai_dot_target: None,
+                ai_last_position: spawn,
+                ai_last_progress_at: started_at_ms,
                 hold_until_ms: 0,
                 stats: PlayerStats::default(),
             });
@@ -254,10 +263,13 @@ impl GameEngine {
             tick_counter: 0,
             max_capture_ratio: 0.0,
             milestone_emitted: HashSet::new(),
+            ai_sector_dot_memory: vec![Vec::new(); sector_count],
+            ai_dot_memory_updated_at: 0,
             next_id_counter: 1,
         };
         engine.update_discovered_sectors_by_players();
         engine.spawn_initial_ghosts();
+        engine.refresh_ai_sector_dot_memory(started_at_ms);
         engine
     }
 
@@ -325,6 +337,9 @@ impl GameEngine {
 
         self.update_gates();
         self.update_power_pellets(now_ms);
+        if now_ms >= self.ai_dot_memory_updated_at.saturating_add(2_000) {
+            self.refresh_ai_sector_dot_memory(now_ms);
+        }
         let player_positions_before_move: BTreeMap<String, (i32, i32)> = self
             .players
             .iter()
@@ -542,6 +557,17 @@ impl GameEngine {
 
         self.players[player_idx].ai_think_at = now_ms + self.rng.int(90, 190) as u64;
         let player = self.players[player_idx].view.clone();
+        if self.players[player_idx].ai_last_position.x != player.x
+            || self.players[player_idx].ai_last_position.y != player.y
+        {
+            self.players[player_idx].ai_last_position = Vec2 {
+                x: player.x,
+                y: player.y,
+            };
+            self.players[player_idx].ai_last_progress_at = now_ms;
+        } else if now_ms.saturating_sub(self.players[player_idx].ai_last_progress_at) >= 1_200 {
+            self.players[player_idx].ai_dot_target = None;
+        }
         let nearest_ghost = self.distance_to_nearest_ghost(player.x, player.y);
         let danger_threshold = if self.is_large_party_endgame_band() {
             2
@@ -560,6 +586,7 @@ impl GameEngine {
         };
 
         if player.state == PlayerState::Power {
+            self.players[player_idx].ai_dot_target = None;
             self.players[player_idx].desired_dir = self.choose_chase_direction(player.x, player.y);
             return;
         }
@@ -588,11 +615,12 @@ impl GameEngine {
 
         if nearest_ghost.unwrap_or(99) <= cautious_dot_threshold {
             self.players[player_idx].desired_dir =
-                self.choose_safe_dot_direction(player.x, player.y);
+                self.choose_ai_dot_direction(player_idx, player.x, player.y, true);
             return;
         }
 
-        self.players[player_idx].desired_dir = self.choose_dot_direction(player.x, player.y);
+        self.players[player_idx].desired_dir =
+            self.choose_ai_dot_direction(player_idx, player.x, player.y, false);
     }
 
     fn get_player_speed(&self, idx: usize, now_ms: u64) -> f32 {
@@ -629,9 +657,15 @@ impl GameEngine {
         self.player_count == 5 && self.config.difficulty == Difficulty::Casual
     }
 
+    fn is_ten_player_casual_clearability_band(&self) -> bool {
+        self.player_count == 10 && self.config.difficulty == Difficulty::Casual
+    }
+
     fn large_party_player_speed_multiplier(&self) -> f32 {
         if self.is_large_party_endgame_band() {
             1.5
+        } else if self.is_ten_player_casual_clearability_band() {
+            1.08
         } else {
             1.0
         }
@@ -648,6 +682,8 @@ impl GameEngine {
     fn large_party_regen_relief_factor(&self) -> f32 {
         if self.is_large_party_endgame_band() {
             0.05
+        } else if self.is_ten_player_casual_clearability_band() {
+            0.65
         } else if self.is_five_player_casual_clearability_band() {
             0.45
         } else {
@@ -658,6 +694,8 @@ impl GameEngine {
     fn large_party_ghost_target_profile(&self) -> (f32, f32, f32, f32) {
         if self.is_large_party_endgame_band() {
             (0.2, 0.45, 0.2, 0.6)
+        } else if self.is_ten_player_casual_clearability_band() {
+            (0.25, 0.58, 0.25, 0.62)
         } else if self.is_five_player_casual_clearability_band() {
             (0.2, 0.72, 0.18, 0.75)
         } else {
@@ -860,6 +898,7 @@ impl GameEngine {
             return;
         }
         self.players[player_idx].view.state = PlayerState::Down;
+        self.players[player_idx].ai_dot_target = None;
         self.players[player_idx].view.down_since = Some(now_ms);
         self.players[player_idx].view.dir = Direction::None;
         self.players[player_idx].move_buffer = 0.0;

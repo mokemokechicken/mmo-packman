@@ -2,6 +2,43 @@ use super::*;
 use std::collections::{HashSet, VecDeque};
 
 impl GameEngine {
+    pub(super) fn refresh_ai_sector_dot_memory(&mut self, now_ms: u64) {
+        let sector_count = self.world.sectors.len();
+        if sector_count == 0 {
+            self.ai_sector_dot_memory.clear();
+            self.ai_dot_memory_updated_at = now_ms;
+            return;
+        }
+
+        let mut buckets: Vec<Vec<Vec2>> = vec![Vec::new(); sector_count];
+        for (x, y) in &self.world.dots {
+            if let Some(sector_id) = self.get_sector_id(*x, *y) {
+                if sector_id < sector_count {
+                    buckets[sector_id].push(Vec2 { x: *x, y: *y });
+                }
+            }
+        }
+
+        const PER_SECTOR_MEMORY: usize = 8;
+        if self.ai_sector_dot_memory.len() != sector_count {
+            self.ai_sector_dot_memory = vec![Vec::new(); sector_count];
+        }
+        for (sector_id, cells) in buckets.into_iter().enumerate() {
+            if cells.len() <= PER_SECTOR_MEMORY {
+                self.ai_sector_dot_memory[sector_id] = cells;
+                continue;
+            }
+            let mut sampled = Vec::with_capacity(PER_SECTOR_MEMORY);
+            let last = cells.len() - 1;
+            for i in 0..PER_SECTOR_MEMORY {
+                let idx = i * last / (PER_SECTOR_MEMORY - 1);
+                sampled.push(cells[idx]);
+            }
+            self.ai_sector_dot_memory[sector_id] = sampled;
+        }
+        self.ai_dot_memory_updated_at = now_ms;
+    }
+
     pub(super) fn update_sector_control(&mut self, dt_ms: u64, now_ms: u64) {
         for sector_id in 0..self.world.sectors.len() {
             let capture_threshold = ((self.world.sectors[sector_id].view.total_dots as f32)
@@ -163,6 +200,188 @@ impl GameEngine {
             .filter(|s| s.view.captured)
             .count();
         captured as f32 / self.world.sectors.len() as f32
+    }
+
+    pub(super) fn choose_ai_dot_direction(
+        &mut self,
+        player_idx: usize,
+        x: i32,
+        y: i32,
+        cautious: bool,
+    ) -> Direction {
+        let min_ghost_distance = if cautious { 2 } else { 0 };
+        let mut target = self.players[player_idx].ai_dot_target;
+
+        if let Some(cell) = target {
+            let has_dot = self.world.dots.contains(&(cell.x, cell.y));
+            let reached = cell.x == x && cell.y == y;
+            if !has_dot || reached {
+                target = None;
+            }
+        }
+
+        if let Some(cell) = target {
+            if let Some(dir) =
+                self.find_shortest_path_direction(x, y, 48, min_ghost_distance, |nx, ny| {
+                    nx == cell.x && ny == cell.y
+                })
+            {
+                self.players[player_idx].ai_dot_target = Some(cell);
+                return dir;
+            }
+            if let Some(dir) = self
+                .find_shortest_path_direction(x, y, 48, 0, |nx, ny| nx == cell.x && ny == cell.y)
+            {
+                self.players[player_idx].ai_dot_target = Some(cell);
+                return dir;
+            }
+        }
+
+        target = self.pick_ai_dot_target(player_idx, x, y, cautious);
+        self.players[player_idx].ai_dot_target = target;
+
+        if let Some(cell) = target {
+            if let Some(dir) =
+                self.find_shortest_path_direction(x, y, 56, min_ghost_distance, |nx, ny| {
+                    nx == cell.x && ny == cell.y
+                })
+            {
+                return dir;
+            }
+            if let Some(dir) = self
+                .find_shortest_path_direction(x, y, 56, 0, |nx, ny| nx == cell.x && ny == cell.y)
+            {
+                return dir;
+            }
+            return self.choose_toward_direction(x, y, cell.x, cell.y);
+        }
+
+        if cautious {
+            self.choose_safe_dot_direction(x, y)
+        } else {
+            self.choose_dot_direction(x, y)
+        }
+    }
+
+    fn pick_ai_dot_target(
+        &self,
+        player_idx: usize,
+        x: i32,
+        y: i32,
+        cautious: bool,
+    ) -> Option<Vec2> {
+        if self.world.dots.is_empty() {
+            return None;
+        }
+
+        let capture_ratio = self.capture_ratio();
+        let mut sector_load = vec![0i32; self.world.sectors.len()];
+        for (idx, player) in self.players.iter().enumerate() {
+            if idx == player_idx || player.view.state == PlayerState::Down {
+                continue;
+            }
+            let Some(target) = player.ai_dot_target else {
+                continue;
+            };
+            if !self.world.dots.contains(&(target.x, target.y)) {
+                continue;
+            }
+            if let Some(sector_id) = self.get_sector_id(target.x, target.y) {
+                if sector_id < sector_load.len() {
+                    sector_load[sector_id] += 1;
+                }
+            }
+        }
+
+        let player_sector = self.get_sector_id(x, y);
+        let assigned_sector = if self.world.sectors.is_empty() {
+            0
+        } else {
+            player_idx % self.world.sectors.len()
+        };
+        let assigned_view = self
+            .world
+            .sectors
+            .get(assigned_sector)
+            .map(|sector| &sector.view);
+        let mut best: Option<((i32, i32, i32, i32), Vec2)> = None;
+
+        for (sector_id, cells) in self.ai_sector_dot_memory.iter().enumerate() {
+            if cells.is_empty() {
+                continue;
+            }
+            let Some(sector) = self.world.sectors.get(sector_id).map(|s| &s.view) else {
+                continue;
+            };
+            if sector.dot_count <= 0 {
+                continue;
+            }
+
+            for cell in cells {
+                if !self.world.dots.contains(&(cell.x, cell.y)) {
+                    continue;
+                }
+                let dist = manhattan(x, y, cell.x, cell.y);
+                let ghost_dist = self.distance_to_nearest_ghost(cell.x, cell.y).unwrap_or(99);
+                if cautious && ghost_dist <= 1 {
+                    continue;
+                }
+
+                let mut score = dist * 12;
+                if let Some(assigned) = assigned_view {
+                    let sector_span =
+                        (sector.row - assigned.row).abs() + (sector.col - assigned.col).abs();
+                    score += sector_span * 10;
+                }
+                if !sector.captured {
+                    score -= if capture_ratio >= 0.85 { 110 } else { 170 };
+                } else {
+                    let loss_threshold = ((sector.total_dots as f32)
+                        * self.large_party_loss_threshold_ratio())
+                    .floor() as i32;
+                    let safe_threshold = loss_threshold.max(1);
+                    let risk = (sector.dot_count - (safe_threshold - 1)).max(0);
+                    if risk > 0 {
+                        score -= 190 + risk * 50;
+                    } else if capture_ratio >= 0.85 && sector.dot_count > 0 {
+                        score -= 70;
+                    }
+                }
+                score -= sector.dot_count.min(60) * 3;
+                score += sector_load[sector_id] * 44;
+                if Some(sector_id) == player_sector {
+                    score -= 12;
+                }
+                if ghost_dist <= 2 {
+                    score += 48;
+                }
+
+                let candidate_key = (score, dist, cell.y, cell.x);
+                let should_replace = best
+                    .as_ref()
+                    .map(|(key, _)| candidate_key < *key)
+                    .unwrap_or(true);
+                if should_replace {
+                    best = Some((candidate_key, *cell));
+                }
+            }
+        }
+
+        if let Some((_, cell)) = best {
+            return Some(cell);
+        }
+
+        self.world
+            .dots
+            .iter()
+            .map(|(dx, dy)| Vec2 { x: *dx, y: *dy })
+            .filter(|cell| {
+                if !cautious {
+                    return true;
+                }
+                self.distance_to_nearest_ghost(cell.x, cell.y).unwrap_or(99) > 1
+            })
+            .min_by_key(|cell| manhattan(x, y, cell.x, cell.y))
     }
 
     pub(super) fn choose_dot_direction(&mut self, x: i32, y: i32) -> Direction {
@@ -491,6 +710,9 @@ impl GameEngine {
         let pos = self.pick_respawn_point(idx);
         self.players[idx].view.x = pos.x;
         self.players[idx].view.y = pos.y;
+        self.players[idx].ai_dot_target = None;
+        self.players[idx].ai_last_position = pos;
+        self.players[idx].ai_last_progress_at = now_ms;
         self.players[idx].view.state = PlayerState::Normal;
         self.players[idx].view.down_since = None;
         self.players[idx].view.power_until = 0;

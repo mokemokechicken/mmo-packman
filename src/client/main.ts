@@ -2322,7 +2322,8 @@ function drawPlayers(
     circle(sx, sy, Math.max(4, tileSize * 0.36), color);
 
     if (player.state === 'power') {
-      drawPowerEffect(sx, sy, tileSize, nowMs, player.id === meId);
+      const remainingMs = Math.max(0, player.powerUntil - nowMs);
+      drawPowerEffect(sx, sy, tileSize, nowMs, remainingMs, player.id === meId);
     }
 
     ctx.fillStyle = '#f7f9ff';
@@ -2369,18 +2370,33 @@ function drawPings(
   }
 }
 
-function drawPowerEffect(x: number, y: number, tileSize: number, nowMs: number, isMe: boolean): void {
+function drawPowerEffect(x: number, y: number, tileSize: number, nowMs: number, remainingMs: number, isMe: boolean): void {
   const base = tileSize * 0.52;
   const phase = (nowMs % 1200) / 1200;
+  const warningWindowMs = 3_000;
+  const dangerWindowMs = 1_000;
+  const inWarning = remainingMs <= warningWindowMs;
+  const inDanger = remainingMs <= dangerWindowMs;
+  const blinkPeriodMs = inDanger ? 140 : 220;
+  const blinkOn = !inWarning || Math.floor(nowMs / blinkPeriodMs) % 2 === 0;
+
+  const ringColor = inDanger ? { r: 255, g: 106, b: 96 } : { r: 95, g: 238, b: 255 };
+  const auraColor = inDanger ? { r: 255, g: 84, b: 110 } : { r: 82, g: 175, b: 255 };
+  const sparkColor = inDanger ? { r: 255, g: 209, b: 118 } : { r: 165, g: 249, b: 255 };
+
+  if (!blinkOn) {
+    circle(x, y, base * 1.05, `rgba(${auraColor.r}, ${auraColor.g}, ${auraColor.b}, 0.08)`);
+    return;
+  }
 
   for (let ring = 0; ring < 3; ring += 1) {
     const p = (phase + ring * 0.22) % 1;
     const radius = base + tileSize * (0.18 + p * 0.75);
     const alpha = (1 - p) * (isMe ? 0.52 : 0.42);
-    circle(x, y, radius, `rgba(95, 238, 255, ${alpha.toFixed(3)})`, false);
+    circle(x, y, radius, `rgba(${ringColor.r}, ${ringColor.g}, ${ringColor.b}, ${alpha.toFixed(3)})`, false);
   }
 
-  circle(x, y, base * 1.18, `rgba(82, 175, 255, ${isMe ? '0.26' : '0.18'})`);
+  circle(x, y, base * 1.18, `rgba(${auraColor.r}, ${auraColor.g}, ${auraColor.b}, ${isMe ? '0.30' : '0.22'})`);
 
   const sparks = 8;
   for (let i = 0; i < sparks; i += 1) {
@@ -2388,7 +2404,12 @@ function drawPowerEffect(x: number, y: number, tileSize: number, nowMs: number, 
     const rr = base * (1.2 + ((i % 2 === 0 ? phase : 1 - phase) * 0.7));
     const sx = x + Math.cos(angle) * rr;
     const sy = y + Math.sin(angle) * rr;
-    circle(sx, sy, Math.max(1.8, tileSize * 0.07), 'rgba(165, 249, 255, 0.88)');
+    circle(
+      sx,
+      sy,
+      Math.max(1.8, tileSize * 0.07),
+      `rgba(${sparkColor.r}, ${sparkColor.g}, ${sparkColor.b}, ${inDanger ? '0.92' : '0.88'})`,
+    );
   }
 }
 
