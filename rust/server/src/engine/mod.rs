@@ -147,6 +147,7 @@ pub struct GameEngineOptions {
 
 #[derive(Clone, Debug)]
 pub struct GameEngine {
+    seed: u32,
     pub started_at_ms: u64,
     pub config: GameConfig,
     pub world: GeneratedWorld,
@@ -242,6 +243,7 @@ impl GameEngine {
         }
 
         let mut engine = Self {
+            seed,
             started_at_ms,
             config,
             world,
@@ -396,6 +398,7 @@ impl GameEngine {
             fruits: self.fruits.clone(),
             sectors: self.world.sectors.iter().map(|s| s.view.clone()).collect(),
             gates: self.world.gates.clone(),
+            pings: Vec::new(),
             events: if include_events {
                 self.events.clone()
             } else {
@@ -416,6 +419,24 @@ impl GameEngine {
             self.events.clear();
         }
         snapshot
+    }
+
+    pub fn current_now_ms(&self) -> u64 {
+        self.started_at_ms + self.elapsed_ms
+    }
+
+    pub fn seed(&self) -> u32 {
+        self.seed
+    }
+
+    pub fn player_position(&self, player_id: &str) -> Option<Vec2> {
+        self.players
+            .iter()
+            .find(|player| player.view.id == player_id)
+            .map(|player| Vec2 {
+                x: player.view.x,
+                y: player.view.y,
+            })
     }
 
     pub fn build_summary(&self) -> GameSummary {

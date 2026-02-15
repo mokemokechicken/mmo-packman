@@ -12,8 +12,9 @@ use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use mmo_packman_rust_server::constants::TICK_MS;
 use mmo_packman_rust_server::engine::{GameEngine, GameEngineOptions};
+use mmo_packman_rust_server::ping_manager::{PingManager, PingManagerOptions, PlacePingInput};
 use mmo_packman_rust_server::ranking_store::RankingStore;
-use mmo_packman_rust_server::types::{Difficulty, Direction, StartPlayer};
+use mmo_packman_rust_server::types::{Difficulty, Direction, PingType, StartPlayer};
 use rand::distr::Alphanumeric;
 use rand::Rng;
 use serde::Deserialize;
@@ -61,6 +62,7 @@ struct ServerState {
     game: Option<GameEngine>,
     running_ai_count: usize,
     ranking_store: RankingStore,
+    ping_manager: PingManager,
 }
 
 impl ServerState {
@@ -73,6 +75,7 @@ impl ServerState {
             game: None,
             running_ai_count: 0,
             ranking_store,
+            ping_manager: PingManager::new(PingManagerOptions::default()),
         }
     }
 }
@@ -88,6 +91,7 @@ enum ParsedClientMessage {
         name: String,
         reconnect_token: Option<String>,
         spectator: bool,
+        room_id: Option<String>,
     },
     LobbyStart {
         difficulty: Option<Difficulty>,
@@ -97,6 +101,9 @@ enum ParsedClientMessage {
     Input {
         dir: Option<Direction>,
         awaken: Option<bool>,
+    },
+    PlacePing {
+        kind: PingType,
     },
     Ping {
         t: f64,
@@ -267,8 +274,9 @@ async fn handle_client_message(state: SharedState, client_id: &str, raw: String)
             name,
             reconnect_token,
             spectator,
+            room_id,
         } => {
-            handle_hello(state, client_id, name, reconnect_token, spectator).await;
+            handle_hello(state, client_id, name, reconnect_token, spectator, room_id).await;
         }
         ParsedClientMessage::Ping { t } => {
             let mut guard = state.lock().await;
@@ -324,6 +332,91 @@ async fn handle_client_message(state: SharedState, client_id: &str, raw: String)
                 game.receive_input(&player_id, dir, awaken);
             }
         }
+        ParsedClientMessage::PlacePing { kind } => {
+            let player_id = {
+                let guard = state.lock().await;
+                guard
+                    .clients
+                    .get(client_id)
+                    .and_then(|ctx| ctx.player_id.clone())
+            };
+            let Some(player_id) = player_id else {
+                send_error_to_client(&state, client_id, "send hello first").await;
+                return;
+            };
+            let mut guard = state.lock().await;
+            let Some(member) = guard.lobby_players.get(&player_id).cloned() else {
+                send_to_client(
+                    &mut guard,
+                    client_id,
+                    &json!({
+                        "type": "error",
+                        "message": "player is not in lobby",
+                    }),
+                    QueuePolicy::DisconnectOnFull,
+                );
+                return;
+            };
+            let Some(game) = guard.game.as_mut() else {
+                send_to_client(
+                    &mut guard,
+                    client_id,
+                    &json!({
+                        "type": "error",
+                        "message": "game is not running",
+                    }),
+                    QueuePolicy::DisconnectOnFull,
+                );
+                return;
+            };
+            if member.spectator {
+                send_to_client(
+                    &mut guard,
+                    client_id,
+                    &json!({
+                        "type": "error",
+                        "message": "spectator cannot place ping",
+                    }),
+                    QueuePolicy::DisconnectOnFull,
+                );
+                return;
+            }
+
+            let Some(pos) = game.player_position(&player_id) else {
+                send_to_client(
+                    &mut guard,
+                    client_id,
+                    &json!({
+                        "type": "error",
+                        "message": "player is not in current game",
+                    }),
+                    QueuePolicy::DisconnectOnFull,
+                );
+                return;
+            };
+            let now_ms = game.current_now_ms();
+
+            let result = guard.ping_manager.place(PlacePingInput {
+                owner_id: player_id,
+                owner_name: member.name,
+                x: pos.x,
+                y: pos.y,
+                kind,
+                now_ms,
+                spectator: member.spectator,
+            });
+            if !result.ok {
+                send_to_client(
+                    &mut guard,
+                    client_id,
+                    &json!({
+                        "type": "error",
+                        "message": result.reason.unwrap_or_else(|| "failed to place ping".to_string()),
+                    }),
+                    QueuePolicy::DisconnectOnFull,
+                );
+            }
+        }
     }
 }
 
@@ -333,8 +426,21 @@ async fn handle_hello(
     requested_name: String,
     reconnect_token: Option<String>,
     spectator_requested: bool,
+    requested_room_id: Option<String>,
 ) {
     let mut guard = state.lock().await;
+    if !is_supported_room(requested_room_id.as_deref()) {
+        send_to_client(
+            &mut guard,
+            client_id,
+            &json!({
+                "type": "error",
+                "message": "roomId is not supported on rust server yet. use 'main'.",
+            }),
+            QueuePolicy::DisconnectOnFull,
+        );
+        return;
+    }
     let name = sanitize_name(&requested_name);
 
     let current_player_id = guard
@@ -566,6 +672,7 @@ async fn handle_lobby_start(
     }
 
     guard.running_ai_count = ai_count;
+    guard.ping_manager.clear();
     guard.game = Some(GameEngine::new(
         start_players,
         difficulty,
@@ -597,7 +704,7 @@ async fn handle_lobby_start(
         }
     }
 
-    let (world, config, started_at_ms, start_note) = {
+    let (world, config, started_at_ms, seed, start_note) = {
         let game = guard
             .game
             .as_ref()
@@ -606,6 +713,7 @@ async fn handle_lobby_start(
             game.get_world_init(),
             game.config.clone(),
             game.started_at_ms,
+            game.seed(),
             format!(
                 "ゲーム開始 (human:{}, ai:{}, limit:{}m)",
                 human_ids.len(),
@@ -634,6 +742,7 @@ async fn handle_lobby_start(
                     "world": world,
                     "config": config,
                     "startedAtMs": started_at_ms,
+                    "seed": seed,
                     "isSpectator": member.spectator,
                 }),
                 QueuePolicy::DisconnectOnFull,
@@ -722,7 +831,7 @@ fn send_welcome_and_initial_state(state: &mut ServerState, client_id: &str, play
         return;
     }
 
-    let (world, config, started_at_ms, snapshot) = {
+    let (world, config, started_at_ms, seed, mut snapshot) = {
         let game = state
             .game
             .as_mut()
@@ -731,9 +840,11 @@ fn send_welcome_and_initial_state(state: &mut ServerState, client_id: &str, play
             game.get_world_init(),
             game.config.clone(),
             game.started_at_ms,
+            game.seed(),
             game.build_snapshot(false),
         )
     };
+    snapshot.pings = state.ping_manager.snapshot(snapshot.now_ms);
 
     send_to_client(
         state,
@@ -744,6 +855,7 @@ fn send_welcome_and_initial_state(state: &mut ServerState, client_id: &str, play
             "world": world,
             "config": config,
             "startedAtMs": started_at_ms,
+            "seed": seed,
             "isSpectator": member.spectator,
         }),
         QueuePolicy::DisconnectOnFull,
@@ -852,13 +964,14 @@ fn start_tick_loop(state: SharedState) {
 }
 
 fn tick_game(state: &mut ServerState) {
-    let snapshot = {
+    let mut snapshot = {
         let Some(game) = state.game.as_mut() else {
             return;
         };
         game.step(TICK_MS);
         game.build_snapshot(true)
     };
+    snapshot.pings = state.ping_manager.snapshot(snapshot.now_ms);
 
     broadcast(
         state,
@@ -893,6 +1006,7 @@ fn tick_game(state: &mut ServerState) {
 
         state.game = None;
         state.running_ai_count = 0;
+        state.ping_manager.clear();
         for player in state.lobby_players.values_mut() {
             player.ai = false;
         }
@@ -1023,6 +1137,16 @@ fn sanitize_name(value: &str) -> String {
     trimmed.chars().take(16).collect()
 }
 
+fn is_supported_room(raw: Option<&str>) -> bool {
+    match raw {
+        None => true,
+        Some(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            normalized == "main"
+        }
+    }
+}
+
 fn normalize_ai_count(value: Option<i64>) -> usize {
     value.unwrap_or(0).clamp(0, 100) as usize
 }
@@ -1055,10 +1179,15 @@ fn parse_client_message(raw: &str) -> Option<ParsedClientMessage> {
                 None => false,
                 Some(value) => value.as_bool()?,
             };
+            let room_id = match object.get("roomId") {
+                None => None,
+                Some(value) => Some(value.as_str()?.to_string()),
+            };
             Some(ParsedClientMessage::Hello {
                 name,
                 reconnect_token,
                 spectator,
+                room_id,
             })
         }
         "lobby_start" => {
@@ -1090,6 +1219,10 @@ fn parse_client_message(raw: &str) -> Option<ParsedClientMessage> {
                 Some(value) => Some(value.as_bool()?),
             };
             Some(ParsedClientMessage::Input { dir, awaken })
+        }
+        "place_ping" => {
+            let kind = PingType::parse(object.get("kind")?.as_str()?)?;
+            Some(ParsedClientMessage::PlacePing { kind })
         }
         "ping" => {
             let t = object.get("t")?.as_f64()?;
@@ -1157,10 +1290,24 @@ mod tests {
                 name,
                 reconnect_token,
                 spectator,
+                room_id,
             } => {
                 assert_eq!(name, "A");
                 assert_eq!(reconnect_token, None);
                 assert!(spectator);
+                assert_eq!(room_id, None);
+            }
+            _ => panic!("expected hello message"),
+        }
+    }
+
+    #[test]
+    fn parse_hello_message_with_room_id() {
+        let parsed = parse_client_message(r#"{"type":"hello","name":"A","roomId":"main"}"#)
+            .expect("hello message should parse");
+        match parsed {
+            ParsedClientMessage::Hello { room_id, .. } => {
+                assert_eq!(room_id.as_deref(), Some("main"));
             }
             _ => panic!("expected hello message"),
         }
@@ -1211,6 +1358,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_place_ping_message() {
+        let parsed = parse_client_message(r#"{"type":"place_ping","kind":"help"}"#);
+        assert!(matches!(
+            parsed,
+            Some(ParsedClientMessage::PlacePing {
+                kind: PingType::Help
+            })
+        ));
+    }
+
+    #[test]
     fn player_order_key_uses_numeric_suffix() {
         assert!(player_order_key("player_2") < player_order_key("player_10"));
     }
@@ -1222,5 +1380,14 @@ mod tests {
         assert_eq!(parse_ranking_limit(Some("abc")), None);
         assert_eq!(parse_ranking_limit(Some("-1")), None);
         assert_eq!(parse_ranking_limit(None), None);
+    }
+
+    #[test]
+    fn unsupported_room_is_rejected() {
+        assert!(!is_supported_room(Some("")));
+        assert!(!is_supported_room(Some("   ")));
+        assert!(!is_supported_room(Some("room-a")));
+        assert!(is_supported_room(Some("main")));
+        assert!(is_supported_room(Some(" MAIN ")));
     }
 }
