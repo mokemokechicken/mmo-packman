@@ -5,16 +5,18 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use mmo_packman_rust_server::constants::TICK_MS;
 use mmo_packman_rust_server::engine::{GameEngine, GameEngineOptions};
+use mmo_packman_rust_server::ranking_store::RankingStore;
 use mmo_packman_rust_server::types::{Difficulty, Direction, StartPlayer};
 use rand::distr::Alphanumeric;
 use rand::Rng;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex};
 use tower_http::services::{ServeDir, ServeFile};
@@ -51,7 +53,6 @@ enum QueuePolicy {
     DisconnectOnFull,
 }
 
-#[derive(Default)]
 struct ServerState {
     clients: HashMap<String, ClientContext>,
     lobby_players: HashMap<String, LobbyPlayerInternal>,
@@ -59,6 +60,26 @@ struct ServerState {
     host_id: Option<String>,
     game: Option<GameEngine>,
     running_ai_count: usize,
+    ranking_store: RankingStore,
+}
+
+impl ServerState {
+    fn new(ranking_store: RankingStore) -> Self {
+        Self {
+            clients: HashMap::new(),
+            lobby_players: HashMap::new(),
+            active_client_by_player_id: HashMap::new(),
+            host_id: None,
+            game: None,
+            running_ai_count: 0,
+            ranking_store,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RankingQuery {
+    limit: Option<String>,
 }
 
 #[derive(Debug)]
@@ -89,11 +110,18 @@ async fn main() {
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(8080);
 
-    let state = Arc::new(Mutex::new(ServerState::default()));
+    let ranking_path = std::env::var("RANKING_DB_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(".data/ranking.json"));
+
+    let state = Arc::new(Mutex::new(ServerState::new(RankingStore::new(
+        ranking_path,
+    ))));
     start_tick_loop(state.clone());
 
     let app = Router::new()
         .route("/healthz", get(healthz))
+        .route("/api/ranking", get(ranking_handler))
         .route("/ws", get(ws_handler))
         .with_state(state);
 
@@ -136,16 +164,29 @@ fn resolve_static_dir() -> Option<PathBuf> {
         PathBuf::from("dist/client"),
         PathBuf::from("../../dist/client"),
     ];
-    for path in candidates {
-        if path.join("index.html").is_file() {
-            return Some(path);
-        }
-    }
-    None
+    candidates
+        .into_iter()
+        .find(|path| path.join("index.html").is_file())
 }
 
 async fn healthz() -> impl IntoResponse {
     Json(json!({ "ok": true }))
+}
+
+async fn ranking_handler(
+    State(state): State<SharedState>,
+    Query(query): Query<RankingQuery>,
+) -> impl IntoResponse {
+    let guard = state.lock().await;
+    Json(
+        guard
+            .ranking_store
+            .build_response(parse_ranking_limit(query.limit.as_deref())),
+    )
+}
+
+fn parse_ranking_limit(raw: Option<&str>) -> Option<usize> {
+    raw.and_then(|value| value.parse::<usize>().ok())
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<SharedState>) -> impl IntoResponse {
@@ -840,6 +881,7 @@ fn tick_game(state: &mut ServerState) {
     };
 
     if let Some(summary) = summary {
+        state.ranking_store.record_match(&summary);
         broadcast(
             state,
             &json!({
@@ -1171,5 +1213,14 @@ mod tests {
     #[test]
     fn player_order_key_uses_numeric_suffix() {
         assert!(player_order_key("player_2") < player_order_key("player_10"));
+    }
+
+    #[test]
+    fn ranking_limit_parsing_is_lenient_for_invalid_values() {
+        assert_eq!(parse_ranking_limit(Some("8")), Some(8));
+        assert_eq!(parse_ranking_limit(Some("0")), Some(0));
+        assert_eq!(parse_ranking_limit(Some("abc")), None);
+        assert_eq!(parse_ranking_limit(Some("-1")), None);
+        assert_eq!(parse_ranking_limit(None), None);
     }
 }

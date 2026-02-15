@@ -356,6 +356,30 @@ pub struct GameSummary {
     pub awards: Vec<AwardEntry>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct PersistentRankingEntry {
+    pub name: String,
+    pub matches: u64,
+    pub wins: u64,
+    #[serde(rename = "winRate")]
+    pub win_rate: f64,
+    #[serde(rename = "avgCaptureRatio")]
+    pub avg_capture_ratio: f64,
+    #[serde(rename = "avgRescues")]
+    pub avg_rescues: f64,
+    #[serde(rename = "bestScore")]
+    pub best_score: i32,
+    #[serde(rename = "updatedAtMs")]
+    pub updated_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RankingResponse {
+    #[serde(rename = "generatedAtIso")]
+    pub generated_at_iso: String,
+    pub entries: Vec<PersistentRankingEntry>,
+}
+
 #[derive(Clone, Debug)]
 pub struct StartPlayer {
     pub id: String,
