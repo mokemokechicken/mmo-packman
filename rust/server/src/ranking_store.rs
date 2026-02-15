@@ -102,14 +102,23 @@ impl RankingStore {
             .players
             .values()
             .map(|entry| {
-                let matches = entry.matches.max(1) as f64;
+                let matches = entry.matches as f64;
+                let (win_rate, avg_capture_ratio, avg_rescues) = if entry.matches > 0 {
+                    (
+                        entry.wins as f64 / matches,
+                        entry.total_capture_ratio / matches,
+                        entry.total_rescues / matches,
+                    )
+                } else {
+                    (0.0, 0.0, 0.0)
+                };
                 PersistentRankingEntry {
                     name: entry.name.clone(),
                     matches: entry.matches,
                     wins: entry.wins.min(entry.matches),
-                    win_rate: entry.wins as f64 / matches,
-                    avg_capture_ratio: entry.total_capture_ratio / matches,
-                    avg_rescues: entry.total_rescues / matches,
+                    win_rate,
+                    avg_capture_ratio,
+                    avg_rescues,
                     best_score: entry.best_score,
                     updated_at_ms: entry.updated_at_ms,
                 }
@@ -478,5 +487,40 @@ mod tests {
         assert_eq!(store.build_response(Some(999)).entries.len(), 3);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn zero_matches_entry_has_zero_averages() {
+        let path = temp_file("ranking-store-zero-matches");
+        let parent = path.parent().expect("parent exists").to_path_buf();
+        fs::create_dir_all(&parent).expect("create dir");
+        let raw = r#"{
+  "version": 1,
+  "players": {
+    "zero": {
+      "name": "Zero",
+      "matches": 0,
+      "wins": 0,
+      "totalCaptureRatio": 9.9,
+      "totalRescues": 4.2,
+      "bestScore": 1,
+      "updatedAtMs": 10
+    }
+  }
+}"#;
+        fs::write(&path, raw).expect("write file");
+
+        let store = RankingStore::new(path.clone());
+        let response = store.build_response(Some(10));
+        assert_eq!(response.entries.len(), 1);
+        let entry = &response.entries[0];
+        assert_eq!(entry.matches, 0);
+        assert_eq!(entry.wins, 0);
+        assert_eq!(entry.win_rate, 0.0);
+        assert_eq!(entry.avg_capture_ratio, 0.0);
+        assert_eq!(entry.avg_rescues, 0.0);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&parent);
     }
 }
