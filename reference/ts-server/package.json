@@ -1,0 +1,21 @@
+{
+  "name": "mmo-packman-ts-server-reference",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/server/index.ts",
+    "reference:ts:simulate": "tsx src/server/simulate.ts",
+    "simulate:rust": "npm --prefix ../.. run simulate:rust --"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.4",
+    "@types/node": "^24.3.1",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
