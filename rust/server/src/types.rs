@@ -87,6 +87,25 @@ impl Difficulty {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum PingType {
+    Focus,
+    Danger,
+    Help,
+}
+
+impl PingType {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "focus" => Some(Self::Focus),
+            "danger" => Some(Self::Danger),
+            "help" => Some(Self::Help),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GameOverReason {
     Victory,
     Timeout,
@@ -221,6 +240,22 @@ pub struct FruitView {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct PingView {
+    pub id: String,
+    #[serde(rename = "ownerId")]
+    pub owner_id: String,
+    #[serde(rename = "ownerName")]
+    pub owner_name: String,
+    pub x: i32,
+    pub y: i32,
+    pub kind: PingType,
+    #[serde(rename = "createdAtMs")]
+    pub created_at_ms: u64,
+    #[serde(rename = "expiresAtMs")]
+    pub expires_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct TimelineEvent {
     #[serde(rename = "atMs")]
     pub at_ms: u64,
@@ -302,6 +337,7 @@ pub struct Snapshot {
     pub fruits: Vec<FruitView>,
     pub sectors: Vec<SectorState>,
     pub gates: Vec<GateState>,
+    pub pings: Vec<PingView>,
     pub events: Vec<RuntimeEvent>,
     pub timeline: Vec<TimelineEvent>,
 }
