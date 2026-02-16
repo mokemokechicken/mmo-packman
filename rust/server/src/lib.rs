@@ -3,5 +3,7 @@ pub mod engine;
 pub mod ping_manager;
 pub mod ranking_store;
 pub mod rng;
+pub mod server_protocol;
+pub mod server_utils;
 pub mod types;
 pub mod world;

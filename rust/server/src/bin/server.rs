@@ -14,7 +14,12 @@ use mmo_packman_rust_server::constants::TICK_MS;
 use mmo_packman_rust_server::engine::{GameEngine, GameEngineOptions};
 use mmo_packman_rust_server::ping_manager::{PingManager, PingManagerOptions, PlacePingInput};
 use mmo_packman_rust_server::ranking_store::RankingStore;
-use mmo_packman_rust_server::types::{Difficulty, Direction, PingType, StartPlayer};
+use mmo_packman_rust_server::server_protocol::{parse_client_message, ParsedClientMessage};
+use mmo_packman_rust_server::server_utils::{
+    is_supported_room, normalize_ai_count, normalize_time_limit_ms, parse_ranking_limit,
+    player_order_key, sanitize_name,
+};
+use mmo_packman_rust_server::types::{Difficulty, StartPlayer};
 use rand::distr::Alphanumeric;
 use rand::Rng;
 use serde::Deserialize;
@@ -83,31 +88,6 @@ impl ServerState {
 #[derive(Debug, Deserialize)]
 struct RankingQuery {
     limit: Option<String>,
-}
-
-#[derive(Debug)]
-enum ParsedClientMessage {
-    Hello {
-        name: String,
-        reconnect_token: Option<String>,
-        spectator: bool,
-        room_id: Option<String>,
-    },
-    LobbyStart {
-        difficulty: Option<Difficulty>,
-        ai_player_count: Option<i64>,
-        time_limit_minutes: Option<i64>,
-    },
-    Input {
-        dir: Option<Direction>,
-        awaken: Option<bool>,
-    },
-    PlacePing {
-        kind: PingType,
-    },
-    Ping {
-        t: f64,
-    },
 }
 
 #[tokio::main]
@@ -190,10 +170,6 @@ async fn ranking_handler(
             .ranking_store
             .build_response(parse_ranking_limit(query.limit.as_deref())),
     )
-}
-
-fn parse_ranking_limit(raw: Option<&str>) -> Option<usize> {
-    raw.and_then(|value| value.parse::<usize>().ok())
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<SharedState>) -> impl IntoResponse {
@@ -1129,134 +1105,6 @@ fn find_player_id_by_token(state: &ServerState, token: &str) -> Option<String> {
         .map(|player| player.id.clone())
 }
 
-fn sanitize_name(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return "Player".to_string();
-    }
-    trimmed.chars().take(16).collect()
-}
-
-fn is_supported_room(raw: Option<&str>) -> bool {
-    match raw {
-        None => true,
-        Some(value) => {
-            let normalized = value.trim().to_ascii_lowercase();
-            normalized == "main"
-        }
-    }
-}
-
-fn normalize_ai_count(value: Option<i64>) -> usize {
-    value.unwrap_or(0).clamp(0, 100) as usize
-}
-
-fn normalize_time_limit_ms(value: Option<i64>) -> Option<u64> {
-    value.map(|minutes| minutes.clamp(1, 10) as u64 * 60_000)
-}
-
-fn player_order_key(player_id: &str) -> u64 {
-    player_id
-        .rsplit('_')
-        .next()
-        .and_then(|suffix| suffix.parse::<u64>().ok())
-        .unwrap_or(u64::MAX)
-}
-
-fn parse_client_message(raw: &str) -> Option<ParsedClientMessage> {
-    let value: Value = serde_json::from_str(raw).ok()?;
-    let object = value.as_object()?;
-    let message_type = object.get("type")?.as_str()?;
-
-    match message_type {
-        "hello" => {
-            let name = object.get("name")?.as_str()?.to_string();
-            let reconnect_token = match object.get("reconnectToken") {
-                None => None,
-                Some(value) => Some(value.as_str()?.to_string()),
-            };
-            let spectator = match object.get("spectator") {
-                None => false,
-                Some(value) => value.as_bool()?,
-            };
-            let room_id = match object.get("roomId") {
-                None => None,
-                Some(value) => Some(value.as_str()?.to_string()),
-            };
-            Some(ParsedClientMessage::Hello {
-                name,
-                reconnect_token,
-                spectator,
-                room_id,
-            })
-        }
-        "lobby_start" => {
-            let difficulty = match object.get("difficulty") {
-                None => None,
-                Some(value) => Difficulty::parse(value.as_str()?),
-            };
-            if object.get("difficulty").is_some() && difficulty.is_none() {
-                return None;
-            }
-            let ai_player_count = parse_optional_i64(object.get("aiPlayerCount"))?;
-            let time_limit_minutes = parse_optional_i64(object.get("timeLimitMinutes"))?;
-            Some(ParsedClientMessage::LobbyStart {
-                difficulty,
-                ai_player_count,
-                time_limit_minutes,
-            })
-        }
-        "input" => {
-            let dir = match object.get("dir") {
-                None => None,
-                Some(value) => Direction::parse_move(value.as_str()?),
-            };
-            if object.get("dir").is_some() && dir.is_none() {
-                return None;
-            }
-            let awaken = match object.get("awaken") {
-                None => None,
-                Some(value) => Some(value.as_bool()?),
-            };
-            Some(ParsedClientMessage::Input { dir, awaken })
-        }
-        "place_ping" => {
-            let kind = PingType::parse(object.get("kind")?.as_str()?)?;
-            Some(ParsedClientMessage::PlacePing { kind })
-        }
-        "ping" => {
-            let t = object.get("t")?.as_f64()?;
-            if !t.is_finite() {
-                return None;
-            }
-            Some(ParsedClientMessage::Ping { t })
-        }
-        _ => None,
-    }
-}
-
-fn parse_optional_i64(value: Option<&Value>) -> Option<Option<i64>> {
-    let Some(value) = value else {
-        return Some(None);
-    };
-    if let Some(number) = value.as_i64() {
-        return Some(Some(number));
-    }
-    if let Some(number) = value.as_u64() {
-        return i64::try_from(number).ok().map(Some);
-    }
-    if let Some(number) = value.as_f64() {
-        if number.is_finite() {
-            let floored = number.floor();
-            if floored < i64::MIN as f64 || floored > i64::MAX as f64 {
-                return None;
-            }
-            return Some(Some(floored as i64));
-        }
-    }
-    None
-}
-
 fn make_id(prefix: &str) -> String {
     let seq = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}_{seq}")
@@ -1275,119 +1123,4 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_hello_message() {
-        let parsed = parse_client_message(r#"{"type":"hello","name":"A","spectator":true}"#)
-            .expect("hello message should parse");
-        match parsed {
-            ParsedClientMessage::Hello {
-                name,
-                reconnect_token,
-                spectator,
-                room_id,
-            } => {
-                assert_eq!(name, "A");
-                assert_eq!(reconnect_token, None);
-                assert!(spectator);
-                assert_eq!(room_id, None);
-            }
-            _ => panic!("expected hello message"),
-        }
-    }
-
-    #[test]
-    fn parse_hello_message_with_room_id() {
-        let parsed = parse_client_message(r#"{"type":"hello","name":"A","roomId":"main"}"#)
-            .expect("hello message should parse");
-        match parsed {
-            ParsedClientMessage::Hello { room_id, .. } => {
-                assert_eq!(room_id.as_deref(), Some("main"));
-            }
-            _ => panic!("expected hello message"),
-        }
-    }
-
-    #[test]
-    fn parse_lobby_start_message() {
-        let parsed = parse_client_message(
-            r#"{"type":"lobby_start","difficulty":"hard","aiPlayerCount":5,"timeLimitMinutes":3}"#,
-        )
-        .expect("lobby start message should parse");
-        match parsed {
-            ParsedClientMessage::LobbyStart {
-                difficulty,
-                ai_player_count,
-                time_limit_minutes,
-            } => {
-                assert_eq!(difficulty as Option<Difficulty>, Some(Difficulty::Hard));
-                assert_eq!(ai_player_count, Some(5));
-                assert_eq!(time_limit_minutes, Some(3));
-            }
-            _ => panic!("expected lobby_start message"),
-        }
-    }
-
-    #[test]
-    fn parse_input_rejects_invalid_direction() {
-        let parsed = parse_client_message(r#"{"type":"input","dir":"invalid"}"#);
-        assert!(parsed.is_none());
-    }
-
-    #[test]
-    fn parse_input_accepts_none_direction() {
-        let parsed = parse_client_message(r#"{"type":"input","dir":"none"}"#);
-        assert!(matches!(
-            parsed,
-            Some(ParsedClientMessage::Input {
-                dir: Some(Direction::None),
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn parse_ping_requires_finite_number() {
-        let parsed = parse_client_message(r#"{"type":"ping","t":12.5}"#);
-        assert!(matches!(parsed, Some(ParsedClientMessage::Ping { .. })));
-    }
-
-    #[test]
-    fn parse_place_ping_message() {
-        let parsed = parse_client_message(r#"{"type":"place_ping","kind":"help"}"#);
-        assert!(matches!(
-            parsed,
-            Some(ParsedClientMessage::PlacePing {
-                kind: PingType::Help
-            })
-        ));
-    }
-
-    #[test]
-    fn player_order_key_uses_numeric_suffix() {
-        assert!(player_order_key("player_2") < player_order_key("player_10"));
-    }
-
-    #[test]
-    fn ranking_limit_parsing_is_lenient_for_invalid_values() {
-        assert_eq!(parse_ranking_limit(Some("8")), Some(8));
-        assert_eq!(parse_ranking_limit(Some("0")), Some(0));
-        assert_eq!(parse_ranking_limit(Some("abc")), None);
-        assert_eq!(parse_ranking_limit(Some("-1")), None);
-        assert_eq!(parse_ranking_limit(None), None);
-    }
-
-    #[test]
-    fn unsupported_room_is_rejected() {
-        assert!(!is_supported_room(Some("")));
-        assert!(!is_supported_room(Some("   ")));
-        assert!(!is_supported_room(Some("room-a")));
-        assert!(is_supported_room(Some("main")));
-        assert!(is_supported_room(Some(" MAIN ")));
-    }
 }
