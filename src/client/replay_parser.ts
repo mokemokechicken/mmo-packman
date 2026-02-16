@@ -1,4 +1,8 @@
 import type { GameConfig, GameSummary, Snapshot, WorldInit } from '../shared/types.js';
+import { cloneSnapshot, cloneWorld, normalizeSnapshot, normalizeSummary } from './replay_model.js';
+
+const SNAPSHOT_REQUIRED_ARRAY_KEYS = ['players', 'ghosts', 'fruits', 'sectors', 'gates', 'events', 'timeline'] as const;
+const WORLD_ARRAY_KEYS = ['tiles', 'sectors', 'gates', 'dots', 'powerPellets'] as const;
 
 export interface ReplayFrame {
   snapshot: Snapshot;
@@ -53,6 +57,9 @@ export function parseReplayLog(raw: unknown): ReplayLog | null {
   if (!isRecordLike(raw.world) || !isRecordLike(raw.config) || !isRecordLike(raw.summary)) {
     return null;
   }
+  if (!hasArrayFields(raw.world, WORLD_ARRAY_KEYS)) {
+    return null;
+  }
   if (typeof raw.seed !== 'number' || !Number.isFinite(raw.seed)) {
     return null;
   }
@@ -66,6 +73,12 @@ export function parseReplayLog(raw: unknown): ReplayLog | null {
       return null;
     }
     if (!isRecordLike(frameRaw.snapshot) || !Array.isArray(frameRaw.dots) || !Array.isArray(frameRaw.pellets)) {
+      return null;
+    }
+    if (!hasArrayFields(frameRaw.snapshot, SNAPSHOT_REQUIRED_ARRAY_KEYS)) {
+      return null;
+    }
+    if ('pings' in frameRaw.snapshot && !Array.isArray(frameRaw.snapshot.pings)) {
       return null;
     }
 
@@ -104,57 +117,15 @@ export function parseReplayLog(raw: unknown): ReplayLog | null {
   };
 }
 
-function normalizeSummary(raw: GameSummary): GameSummary {
-  return {
-    ...raw,
-    awards: raw.awards ?? [],
-  };
-}
-
-function normalizeSnapshot(raw: Snapshot): Snapshot {
-  return {
-    ...raw,
-    pings: raw.pings ?? [],
-  };
-}
-
-function cloneWorld(raw: WorldInit): WorldInit {
-  return {
-    ...raw,
-    tiles: [...raw.tiles],
-    sectors: raw.sectors.map((sector) => ({ ...sector })),
-    gates: raw.gates.map((gate) => ({
-      ...gate,
-      a: { ...gate.a },
-      b: { ...gate.b },
-      switchA: { ...gate.switchA },
-      switchB: { ...gate.switchB },
-    })),
-    dots: raw.dots.map(([x, y]): [number, number] => [x, y]),
-    powerPellets: raw.powerPellets.map((pellet) => ({ ...pellet })),
-  };
-}
-
-function cloneSnapshot(raw: Snapshot): Snapshot {
-  return {
-    ...raw,
-    players: raw.players.map((player) => ({ ...player })),
-    ghosts: raw.ghosts.map((ghost) => ({ ...ghost })),
-    fruits: raw.fruits.map((fruit) => ({ ...fruit })),
-    sectors: raw.sectors.map((sector) => ({ ...sector })),
-    gates: raw.gates.map((gate) => ({
-      ...gate,
-      a: { ...gate.a },
-      b: { ...gate.b },
-      switchA: { ...gate.switchA },
-      switchB: { ...gate.switchB },
-    })),
-    pings: raw.pings.map((ping) => ({ ...ping })),
-    events: raw.events.map((event) => ({ ...event })),
-    timeline: raw.timeline.map((item) => ({ ...item })),
-  };
-}
-
 function isRecordLike(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
+}
+
+function hasArrayFields(record: Record<string, unknown>, keys: readonly string[]): boolean {
+  for (const key of keys) {
+    if (!Array.isArray(record[key])) {
+      return false;
+    }
+  }
+  return true;
 }
